@@ -9,13 +9,27 @@ from redis import Redis
 from app.config import settings
 from app.services import twilio_service, openai_service
 
+_mongo_client: MongoClient | None = None
+_redis_client: Redis | None = None
+
 
 def _db():
-    return MongoClient(settings.MONGO_URI)[settings.MONGO_DB]
+    global _mongo_client
+    if _mongo_client is None:
+        _mongo_client = MongoClient(settings.MONGO_URI)
+    return _mongo_client[settings.MONGO_DB]
 
 
 def _redis() -> Redis:
-    return Redis.from_url(settings.REDIS_URL)
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = Redis.from_url(
+            settings.REDIS_URL,
+            health_check_interval=30,
+            socket_keepalive=True,
+            retry_on_timeout=True,
+        )
+    return _redis_client
 
 
 def _publish(user_id: str, event: str, data: dict) -> None:

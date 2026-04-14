@@ -4,8 +4,24 @@ from twilio.request_validator import RequestValidator
 from app.config import settings
 
 
+_client_instance: Client | None = None
+
+
 def _client() -> Client:
-    return Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    return _client_instance
+
+
+_validator_instance: RequestValidator | None = None
+
+
+def _validator() -> RequestValidator:
+    global _validator_instance
+    if _validator_instance is None:
+        _validator_instance = RequestValidator(settings.TWILIO_AUTH_TOKEN)
+    return _validator_instance
 
 
 def to_whatsapp(num: str) -> str:
@@ -40,5 +56,4 @@ def validate_signature(url: str, params: dict, signature: str) -> bool:
         return True
     if not settings.TWILIO_AUTH_TOKEN or not signature:
         return False
-    validator = RequestValidator(settings.TWILIO_AUTH_TOKEN)
-    return validator.validate(url, params, signature)
+    return _validator().validate(url, params, signature)

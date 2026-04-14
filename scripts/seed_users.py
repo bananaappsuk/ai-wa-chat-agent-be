@@ -16,7 +16,7 @@ from app.models.common import utcnow  # noqa: E402
 
 USERS = [
     {
-        "email": "admin@aitelechat.local",
+        "email": "admin@aitelechat.com",
         "password": "AdminPass123!",
         "full_name": "Admin User",
         "company_name": "NextGen Techs",
@@ -25,7 +25,7 @@ USERS = [
         "plan": "enterprise",
     },
     {
-        "email": "user@aitelechat.local",
+        "email": "user@aitelechat.com",
         "password": "UserPass123!",
         "full_name": "Test User",
         "company_name": "Acme Ltd",
@@ -63,8 +63,8 @@ async def main() -> None:
 
     print()
     print("Login at:  /login")
-    print("Admin:  admin@aitelechat.local  /  AdminPass123!")
-    print("User :  user@aitelechat.local   /  UserPass123!")
+    print("Admin:  admin@aitelechat.com  /  AdminPass123!")
+    print("User :  user@aitelechat.com   /  UserPass123!")
 
 
 if __name__ == "__main__":

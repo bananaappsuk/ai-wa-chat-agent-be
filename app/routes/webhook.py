@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, Request, Response, HTTPException
 from bson import ObjectId
 
@@ -104,7 +106,7 @@ async def whatsapp_webhook(request: Request) -> Response:
             "Reply START at any time to opt back in."
         )
         try:
-            twilio_service.send_whatsapp(from_phone, confirm)
+            await asyncio.to_thread(twilio_service.send_whatsapp, from_phone, confirm)
         except Exception:
             pass
         return Response(content="<Response/>", media_type="application/xml")
@@ -120,7 +122,7 @@ async def whatsapp_webhook(request: Request) -> Response:
             terms = agent.get("terms_text")
             if welcome:
                 try:
-                    twilio_service.send_whatsapp(from_phone, welcome)
+                    await asyncio.to_thread(twilio_service.send_whatsapp, from_phone, welcome)
                     await db.messages.insert_one({
                         "user_id": user_id, "lead_id": lead_id, "direction": "outbound",
                         "message": welcome, "status": "sent", "created_at": utcnow(),
@@ -129,7 +131,7 @@ async def whatsapp_webhook(request: Request) -> Response:
                     pass
             if terms:
                 try:
-                    twilio_service.send_whatsapp(from_phone, terms)
+                    await asyncio.to_thread(twilio_service.send_whatsapp, from_phone, terms)
                     await db.messages.insert_one({
                         "user_id": user_id, "lead_id": lead_id, "direction": "outbound",
                         "message": terms, "status": "sent", "created_at": utcnow(),

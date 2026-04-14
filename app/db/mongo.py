@@ -19,6 +19,17 @@ def get_db() -> AsyncIOMotorDatabase:
     return _db
 
 
+def close_client() -> None:
+    global _client, _db
+    if _client is not None:
+        try:
+            _client.close()
+        except Exception:
+            pass
+    _client = None
+    _db = None
+
+
 async def init_indexes() -> None:
     db = get_db()
     await db.users.create_index("email", unique=True)

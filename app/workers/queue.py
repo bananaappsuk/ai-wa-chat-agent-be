@@ -9,7 +9,12 @@ _queue: Queue | None = None
 def get_redis() -> Redis:
     global _redis
     if _redis is None:
-        _redis = Redis.from_url(settings.REDIS_URL)
+        _redis = Redis.from_url(
+            settings.REDIS_URL,
+            health_check_interval=30,
+            socket_keepalive=True,
+            retry_on_timeout=True,
+        )
     return _redis
 
 
@@ -22,3 +27,18 @@ def get_queue() -> Queue:
 
 def enqueue(func, *args, **kwargs):
     return get_queue().enqueue(func, *args, **kwargs)
+
+
+def close_redis() -> None:
+    global _redis, _queue
+    if _redis is not None:
+        try:
+            _redis.close()
+        except Exception:
+            pass
+        try:
+            _redis.connection_pool.disconnect()
+        except Exception:
+            pass
+    _redis = None
+    _queue = None

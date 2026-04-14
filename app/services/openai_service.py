@@ -17,7 +17,7 @@ _client: Optional[OpenAI] = None
 def _c() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        _client = OpenAI(api_key=settings.OPENAI_API_KEY, timeout=30.0, max_retries=2)
     return _client
 
 

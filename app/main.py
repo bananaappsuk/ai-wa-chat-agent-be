@@ -5,8 +5,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.db.mongo import init_indexes
+from app.db.mongo import close_client as close_mongo, init_indexes
 from app.routes import auth, leads, messages, agents, campaigns, profile, admin, webhook, blacklist, dashboard, ws as ws_route
+from app.workers.queue import close_redis
 
 
 @asynccontextmanager
@@ -17,6 +18,12 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        close_redis()
+        close_mongo()
 
 
 app = FastAPI(title="AI WhatsApp Chat Agent API", lifespan=lifespan)

@@ -37,10 +37,19 @@ async def redis_pubsub_loop():
     r = get_redis()
     pubsub = r.pubsub()
     pubsub.subscribe("ws:events")
-    loop = asyncio.get_event_loop()
-    while True:
-        try:
-            msg = await loop.run_in_executor(None, lambda: pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0))
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            try:
+                msg = await loop.run_in_executor(
+                    None,
+                    lambda: pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(1)
+                continue
             if msg and msg.get("type") == "message":
                 try:
                     data = json.loads(msg["data"])
@@ -51,6 +60,12 @@ async def redis_pubsub_loop():
                 payload = data.get("data")
                 if user_id and event:
                     await ws_manager.push(user_id, event, payload)
-            await asyncio.sleep(0)
+    finally:
+        try:
+            pubsub.unsubscribe("ws:events")
         except Exception:
-            await asyncio.sleep(1)
+            pass
+        try:
+            pubsub.close()
+        except Exception:
+            pass
