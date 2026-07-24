@@ -11,7 +11,7 @@ def get_redis() -> Redis:
     if _redis is None:
         _redis = Redis.from_url(
             settings.REDIS_URL,
-            health_check_interval=30,
+            health_check_interval=60,
             socket_keepalive=True,
             retry_on_timeout=True,
         )
