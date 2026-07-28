@@ -9,10 +9,20 @@ class WSManager:
         self._conns: dict[str, set[WebSocket]] = {}
         self._lock = asyncio.Lock()
 
+    def connection_count(self, user_id: str) -> int:
+        return len(self._conns.get(user_id) or ())
+
     async def connect(self, user_id: str, ws: WebSocket) -> None:
         await ws.accept()
         async with self._lock:
             self._conns.setdefault(user_id, set()).add(ws)
+            total = sum(len(s) for s in self._conns.values())
+        try:
+            from app.observability.metrics import set_ws_connections
+
+            set_ws_connections(total)
+        except Exception:
+            pass
 
     async def disconnect(self, user_id: str, ws: WebSocket) -> None:
         async with self._lock:
@@ -21,6 +31,13 @@ class WSManager:
                 conns.remove(ws)
                 if not conns:
                     self._conns.pop(user_id, None)
+            total = sum(len(s) for s in self._conns.values())
+        try:
+            from app.observability.metrics import set_ws_connections
+
+            set_ws_connections(total)
+        except Exception:
+            pass
 
     async def push(self, user_id: str, event: str, payload: Any) -> None:
         msg = json.dumps({"event": event, "data": payload})
