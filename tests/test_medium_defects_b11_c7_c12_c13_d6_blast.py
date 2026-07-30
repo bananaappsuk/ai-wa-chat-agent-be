@@ -777,7 +777,10 @@ def _finalize_db(agg_rows, *, status="sending", total=None):
         "_id": ObjectId(),
         "status": status,
         "total_recipients": total,
-        "sent_count": counts.get("sent", 0) + counts.get("delivered", 0) + counts.get("read", 0),
+        "sent_count": sum(
+            counts.get(s, 0)
+            for s in ("sent", "delivered", "read", "queued", "accepted", "sending")
+        ),
         "failed_count": counts.get("failed", 0),
         "cancelled_count": counts.get("cancelled", 0),
     }
@@ -819,6 +822,24 @@ def test_finalize_blast_completed_when_all_sent():
     with patch.object(tasks, "_publish"):
         tasks._finalize_blast(db, "u1", str(ObjectId()))
     assert "completed" in _statuses_set(db)
+
+
+def test_finalize_blast_completed_when_twilio_queued():
+    """Twilio create returns status=queued; that must count as sent, not 0/N."""
+    from app.workers import tasks
+
+    db = _finalize_db([{"_id": "queued", "n": 2}], total=2)
+    with patch.object(tasks, "_publish"):
+        tasks._finalize_blast(db, "u1", str(ObjectId()))
+    assert "completed" in _statuses_set(db)
+    # recount must persist sent_count > 0
+    set_calls = [
+        c.args[1]["$set"]
+        for c in db.blast_campaigns.update_one.call_args_list
+        if "sent_count" in c.args[1].get("$set", {})
+    ]
+    assert set_calls
+    assert set_calls[0]["sent_count"] == 2
 
 
 def test_finalize_blast_noop_when_already_terminal():

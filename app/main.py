@@ -31,6 +31,7 @@ from app.routes import (
     notifications,
     conversations,
     analytics,
+    billing,
 )
 from app.observability import metrics as metrics_route
 from app.workers.queue import close_redis, get_redis
@@ -177,5 +178,7 @@ app.include_router(activity.router, prefix=api_prefix)
 app.include_router(notifications.router, prefix=api_prefix)
 app.include_router(conversations.router, prefix=api_prefix)
 app.include_router(analytics.router, prefix=api_prefix)
+app.include_router(billing.router, prefix=api_prefix)
 app.include_router(ws_route.router)
 app.include_router(metrics_route.router)
+

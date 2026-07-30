@@ -223,6 +223,44 @@ class Settings(BaseSettings):
     SENDGRID_API_KEY: str = ""
     AVATAR_MAX_BYTES: int = 2 * 1024 * 1024
 
+    # Stripe billing — mode + dual env
+    STRIPE_MODE: str = ""  # test | live (empty = auto: production→live, else test)
+    STRIPE_ALLOW_LIVE_IN_DEV: bool = False
+    FRONTEND_BASE_URL: str = "http://localhost:8080"
+
+    STRIPE_TEST_SECRET_KEY: str = ""
+    STRIPE_TEST_PUBLISHABLE_KEY: str = ""
+    STRIPE_TEST_WEBHOOK_SECRET: str = ""
+    STRIPE_TEST_PRICE_STARTER: str = ""
+    STRIPE_TEST_PRICE_PROFESSIONAL: str = ""
+    STRIPE_TEST_PRICE_BUSINESS: str = ""
+
+    STRIPE_LIVE_SECRET_KEY: str = ""
+    STRIPE_LIVE_PUBLISHABLE_KEY: str = ""
+    STRIPE_LIVE_WEBHOOK_SECRET: str = ""
+    STRIPE_LIVE_PRICE_STARTER: str = ""
+    STRIPE_LIVE_PRICE_PROFESSIONAL: str = ""
+    STRIPE_LIVE_PRICE_BUSINESS: str = ""
+
+    # Deprecated single-slot fallbacks (migrate to STRIPE_TEST_* / STRIPE_LIVE_*)
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_PUBLISHABLE_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    STRIPE_PRICE_STARTER: str = ""
+    STRIPE_PRICE_PROFESSIONAL: str = ""
+    STRIPE_PRICE_BUSINESS: str = ""
+
+    STRIPE_SUCCESS_URL: str = "http://localhost:8080/billing?checkout=success"
+    STRIPE_CANCEL_URL: str = "http://localhost:8080/billing?checkout=canceled"
+    STRIPE_PORTAL_RETURN_URL: str = "http://localhost:8080/billing"
+    STRIPE_TRIAL_DAYS: int = 14
+    STRIPE_CUSTOMER_LOCK_TTL_SECONDS: int = 60
+    STRIPE_WEBHOOK_CLAIM_TTL_SECONDS: int = 300
+    BILLING_CONTACT_SALES_URL: str = (
+        "https://calendar.google.com/calendar/u/0/appointments/schedules/"
+        "AcZssZ0qcRUglD8qicU4kzrD-rFtlyP94h0JaZnv_-41rtPM-BkStaGx-mBvWG0nOP8EzQzaaMgYk8Qm"
+    )
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("APP_ENV", mode="before")
@@ -378,6 +416,15 @@ class Settings(BaseSettings):
                     "RUN_INLINE_SCHEDULER must be false in staging/production "
                     "(run python scheduler.py as its own service)"
                 )
+
+        # Stripe (always evaluate; production rules are stricter inside)
+        try:
+            from app.billing.stripe_config import clear_stripe_runtime_cache, validate_stripe_configuration
+
+            clear_stripe_runtime_cache()
+            errors.extend(validate_stripe_configuration(for_startup=True))
+        except Exception as exc:  # pragma: no cover
+            errors.append(f"Stripe configuration validation error: {exc}")
 
         # Always validate CORS shape (even in dev) for wildcards with credentials
         if "*" in self.cors_origins_list:

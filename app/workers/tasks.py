@@ -783,7 +783,15 @@ def _recount_blast(db, user_id: str, blast_id: str) -> Optional[dict]:
         {"$group": {"_id": "$status", "n": {"$sum": 1}}},
     ]
     counts = {str(row["_id"]): int(row["n"]) for row in db.blast_recipients.aggregate(pipe)}
-    sent = counts.get("sent", 0) + counts.get("delivered", 0) + counts.get("read", 0)
+    # Twilio create often returns "queued"/"accepted"; treat those as sent (same as Live Chat).
+    sent = (
+        counts.get("sent", 0)
+        + counts.get("delivered", 0)
+        + counts.get("read", 0)
+        + counts.get("queued", 0)
+        + counts.get("accepted", 0)
+        + counts.get("sending", 0)
+    )
     failed = counts.get("failed", 0)
     cancelled = counts.get("cancelled", 0)
     db.blast_campaigns.update_one(
@@ -894,11 +902,18 @@ def _process_blast_recipient(
                     raise RuntimeError("Blast has no message body or media")
                 result = twilio_service.send_whatsapp(phone, body=body, media_url=resolved_media)
 
+            provider_status = (result.get("status") or "").strip().lower()
+            app_status = (
+                "sent"
+                if provider_status in ("", "queued", "accepted", "sending")
+                else provider_status
+            )
             db.blast_recipients.update_one(
                 {"_id": recipient["_id"]},
                 {
                     "$set": {
-                        "status": result.get("status") or "sent",
+                        "status": app_status,
+                        "provider_status": result.get("status"),
                         "twilio_sid": result.get("sid"),
                         "message_purpose": purpose,
                         "error": None,

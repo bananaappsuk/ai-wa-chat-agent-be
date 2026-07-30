@@ -22,7 +22,7 @@ USERS = [
         "company_name": "NextGen Techs",
         "phone": "+447453289655",
         "role": "admin",
-        "plan": "enterprise",
+        "plan": "free",
     },
     {
         "email": "user@aitelechat.com",
@@ -53,6 +53,8 @@ async def main() -> None:
             "updated_at": utcnow(),
         }
         if existing:
+            # Do not overwrite billing plan on re-seed (Stripe webhooks own paid plans).
+            doc.pop("plan", None)
             await db.users.update_one({"_id": existing["_id"]}, {"$set": doc})
             action = "updated"
         else:

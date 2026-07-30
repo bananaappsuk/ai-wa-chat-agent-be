@@ -140,6 +140,154 @@ def fetch_message_status(sid: str) -> Optional[dict]:
     }
 
 
+def get_content_template_info(content_sid: str) -> dict:
+    """
+    Fetch Twilio Content Template metadata + WhatsApp approval status.
+    WhatsApp out-of-session sends require whatsapp.status == 'approved'.
+    Local DB 'approved' alone is not enough (that only mirrors our app flag).
+    """
+    from app.services.whatsapp_template_approval import normalize_whatsapp_approval_status
+
+    sid = (content_sid or "").strip()
+    if not sid:
+        return {
+            "content_sid": None,
+            "whatsapp_status": None,
+            "whatsapp_status_raw": None,
+            "body": None,
+            "friendly_name": None,
+            "whatsapp_category": None,
+            "language": None,
+            "business_initiated": None,
+            "user_initiated": None,
+            "provider": "twilio_content",
+            "variables": {},
+        }
+    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
+        raise RuntimeError("Twilio credentials not configured")
+    client = _client()
+    content = client.content.v1.contents(sid).fetch()
+    body = None
+    types = getattr(content, "types", None) or {}
+    if isinstance(types, dict):
+        text = types.get("twilio/text") or {}
+        if isinstance(text, dict):
+            body = (text.get("body") or "").strip() or None
+        if not body:
+            # Common WhatsApp template type keys
+            for key in ("twilio/quick-reply", "whatsapp/card", "twilio/media"):
+                block = types.get(key) or {}
+                if isinstance(block, dict) and (block.get("body") or block.get("title")):
+                    body = (block.get("body") or block.get("title") or "").strip() or None
+                    if body:
+                        break
+
+    wa_status_raw = None
+    wa_category = None
+    business_initiated = None
+    user_initiated = None
+    try:
+        approvals = client.content.v1.contents(sid).approval_fetch().fetch()
+        wa = getattr(approvals, "whatsapp", None) or {}
+        if isinstance(wa, dict):
+            wa_status_raw = (wa.get("status") or "").strip() or None
+            wa_category = (wa.get("category") or "").strip() or None
+            # Some Twilio payloads expose allow flags under nested keys
+            bi = wa.get("allow_category_change")  # not BI — keep None unless explicit
+            if "business_initiated" in wa:
+                business_initiated = bool(wa.get("business_initiated"))
+            if "user_initiated" in wa:
+                user_initiated = bool(wa.get("user_initiated"))
+            _ = bi
+        elif wa is not None:
+            wa_status_raw = (getattr(wa, "status", None) or "").strip() or None
+            wa_category = (getattr(wa, "category", None) or "").strip() or None
+    except Exception as exc:
+        logger.warning(
+            "Could not fetch WhatsApp approval for content_sid=%s err=%s",
+            sid[:12],
+            type(exc).__name__,
+        )
+
+    language = getattr(content, "language", None) or None
+    friendly = getattr(content, "friendly_name", None)
+    wa_norm = normalize_whatsapp_approval_status(wa_status_raw) if wa_status_raw else "unknown"
+    if business_initiated is None:
+        business_initiated = wa_norm == "approved"
+
+    return {
+        "content_sid": sid,
+        "whatsapp_status": wa_norm,
+        "whatsapp_status_raw": (wa_status_raw or "").lower() or None,
+        "body": body,
+        "friendly_name": friendly,
+        "whatsapp_category": wa_category,
+        "category": wa_category,
+        "language": language,
+        "business_initiated": business_initiated,
+        "user_initiated": user_initiated,
+        "provider": "twilio_content",
+        "variables": getattr(content, "variables", None) or {},
+    }
+
+
+def assert_whatsapp_template_approved_for_out_of_session(
+    content_sid: str,
+    *,
+    template_name: str | None = None,
+) -> dict:
+    """
+    Raise if this Content SID cannot start a business-initiated WhatsApp chat.
+    Unapproved/pending templates must not be sent outside the 24h window.
+    Once Meta marks the template Approved, this check passes automatically
+    (live status is fetched on every closed-window send — no code change needed).
+    """
+    from app.services.whatsapp_template_approval import (
+        WhatsAppTemplateNotApprovedError,
+        is_whatsapp_template_sendable,
+        mask_content_sid,
+    )
+
+    info = get_content_template_info(content_sid)
+    status = info.get("whatsapp_status")
+    name = (template_name or info.get("friendly_name") or "").strip() or None
+    if is_whatsapp_template_sendable(status):
+        return info
+    raise WhatsAppTemplateNotApprovedError(
+        whatsapp_status=str(status or "unknown"),
+        content_sid=info.get("content_sid") or content_sid,
+        template_name=name,
+    )
+
+
+def log_template_send_gate(
+    *,
+    recipient_phone: str | None,
+    window_open: bool,
+    template_name: str | None,
+    content_sid: str | None,
+    approval_status: str | None,
+    twilio_error_code: str | None = None,
+    twilio_error_message: str | None = None,
+    outcome: str,
+) -> None:
+    """Structured campaign template gate log — never includes secrets/tokens."""
+    from app.services.whatsapp_template_approval import mask_content_sid
+
+    logger.info(
+        "campaign_template_gate outcome=%s recipient=%s window_open=%s template_name=%s "
+        "content_sid=%s approval_status=%s twilio_error_code=%s twilio_error_message=%s",
+        outcome,
+        (recipient_phone or "")[-6:],  # last 6 digits only
+        window_open,
+        template_name or "",
+        mask_content_sid(content_sid),
+        approval_status or "",
+        twilio_error_code or "",
+        (twilio_error_message or "")[:200],
+    )
+
+
 def validate_signature(url: str, params: dict, signature: str) -> bool:
     # Bypass only when explicitly disabled (dev/test). Staging/production startup rejects disable.
     if not settings.twilio_validate_signatures:

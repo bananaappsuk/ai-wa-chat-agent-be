@@ -837,13 +837,32 @@ def generate_campaign_content(
 
     if path.path == "template":
         tid, sid = resolve_fallback_template(campaign)
+        preview_body = ""
+        warnings = ["static_template"]
+        if sid:
+            try:
+                from app.services import twilio_service
+
+                info = twilio_service.get_content_template_info(sid)
+                preview_body = (info.get("body") or "").strip()
+                wa = (info.get("whatsapp_status") or "").lower()
+                if wa and wa != "approved":
+                    warnings.append(f"whatsapp_approval_{wa or 'unknown'}")
+                elif not wa:
+                    warnings.append("whatsapp_approval_unknown")
+            except Exception:
+                preview_body = ""
+                warnings.append("template_preview_unavailable")
+        if not preview_body:
+            preview_body = f"[WhatsApp template {sid or tid or 'selected'}]"
         return GenerationResult(
             ok=True,
             content_source="template",
+            message=preview_body,
             template_variables=dict(campaign.get("content_variables") or {}),
             template_content_sid=sid,
             confidence=1.0,
-            warnings=["static_template"],
+            warnings=warnings,
             context_sources_used=["campaign_template"],
             knowledge_sources_used=[],
         )
@@ -921,13 +940,29 @@ def generate_campaign_content(
                 template_id=tid,
                 generated={},
             )
+            preview_body = ""
+            warnings = ["kb_mode_closed_window_template_no_generative_ai"]
+            if sid:
+                try:
+                    from app.services import twilio_service
+
+                    info = twilio_service.get_content_template_info(sid)
+                    preview_body = (info.get("body") or "").strip()
+                    wa = (info.get("whatsapp_status") or "").lower()
+                    if wa and wa != "approved":
+                        warnings.append(f"whatsapp_approval_{wa}")
+                except Exception:
+                    warnings.append("template_preview_unavailable")
+            if not preview_body:
+                preview_body = f"[WhatsApp template {sid or tid or 'selected'}]"
             return GenerationResult(
                 ok=True,
                 content_source="template" if not vars_out else "ai_template_variables",
+                message=preview_body,
                 template_variables=dict(vars_out or {}),
                 template_content_sid=sid,
                 confidence=1.0,
-                warnings=["kb_mode_closed_window_template_no_generative_ai"],
+                warnings=warnings,
                 context_sources_used=["campaign_template"],
                 knowledge_sources_used=knowledge_sources,
             )

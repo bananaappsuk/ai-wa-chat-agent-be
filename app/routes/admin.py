@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 
+from app.billing.plans import ALL_PLAN_KEYS, normalize_plan_key
 from app.db.mongo import get_db
 from app.middleware.auth import current_admin, hash_password
 from app.middleware.security import get_request_id
@@ -22,7 +23,7 @@ from app.services.password_reset import issue_reset_token
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-_ALLOWED_PLANS = frozenset({"free", "starter", "pro", "enterprise"})
+_ALLOWED_PLANS = frozenset(ALL_PLAN_KEYS) | frozenset({"pro"})  # legacy alias
 _ALLOWED_ROLES = frozenset({"user", "agent", "moderator", "admin"})
 _ADMIN_PATCH_ALLOW = frozenset(
     {
@@ -50,6 +51,7 @@ class RoleBody(BaseModel):
 
 class PlanBody(BaseModel):
     plan: str = Field(max_length=40)
+    manual_override: bool = False
 
     @field_validator("plan")
     @classmethod
@@ -57,7 +59,7 @@ class PlanBody(BaseModel):
         p = (v or "").strip().lower()
         if p not in _ALLOWED_PLANS:
             raise ValueError("Invalid plan")
-        return p
+        return normalize_plan_key(p)
 
 
 class AdminUserCreate(BaseModel):
@@ -97,7 +99,7 @@ class AdminUserPatch(BaseModel):
         p = v.strip().lower()
         if p not in _ALLOWED_PLANS:
             raise ValueError("Invalid plan")
-        return p
+        return normalize_plan_key(p)
 
 
 def _safe_user(doc: dict) -> dict:
@@ -540,11 +542,37 @@ async def update_role(uid: str, body: RoleBody, admin: dict = Depends(current_ad
 
 @router.post("/users/{uid}/plan")
 async def update_plan(uid: str, body: PlanBody, admin: dict = Depends(current_admin)) -> dict:
+    """
+    Admin plan override.
+
+    Stripe-backed paid plans (starter/professional/business) require
+    manual_override=true and do NOT create Stripe subscriptions.
+    Prefer Customer Portal / Checkout for real billing changes.
+    """
+    from app.billing.plans import PAID_PLAN_KEYS
+    from app.models.common import utcnow as _utcnow
+
     require_permission(admin, "manage_users")
     require_object_id(uid)
-    res = await get_db().users.update_one(
-        {"_id": ObjectId(uid)}, {"$set": {"plan": body.plan, "updated_at": utcnow()}}
-    )
+    plan = body.plan
+    set_fields: dict = {"plan": plan, "updated_at": _utcnow()}
+
+    if plan in PAID_PLAN_KEYS:
+        if not body.manual_override:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Setting a Stripe-backed paid plan requires manual_override=true. "
+                    "This does not create a Stripe subscription — use Checkout/Portal for paid billing."
+                ),
+            )
+        set_fields["subscription_status"] = "manual_override"
+        set_fields["subscription_updated_at"] = _utcnow()
+    elif plan == "free":
+        # Clearing to free without touching Stripe IDs (audit trail preserved)
+        set_fields["subscription_status"] = "none"
+
+    res = await get_db().users.update_one({"_id": ObjectId(uid)}, {"$set": set_fields})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Not found")
     audit(
@@ -552,6 +580,9 @@ async def update_plan(uid: str, body: PlanBody, admin: dict = Depends(current_ad
         user_id=str(admin["_id"]),
         target_id=uid,
         request_id=get_request_id(),
-        extra={"plan": body.plan},
+        extra={
+            "plan": plan,
+            "manual_override": bool(body.manual_override),
+        },
     )
-    return {"ok": True}
+    return {"ok": True, "manual_override": bool(body.manual_override and plan in PAID_PLAN_KEYS)}

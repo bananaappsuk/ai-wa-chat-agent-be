@@ -202,4 +202,18 @@ async def init_indexes() -> None:
     await db.leads.create_index([("user_id", 1), ("current_intent", 1)])
     await db.leads.create_index([("user_id", 1), ("classified_at", -1)])
 
+    # Stripe billing
+    await db.users.create_index(
+        "stripe_customer_id",
+        unique=True,
+        sparse=True,
+    )
+    await db.users.create_index(
+        "stripe_subscription_id",
+        unique=True,
+        sparse=True,
+    )
+    await db.stripe_webhook_events.create_index("processed_at")
+    await db.stripe_webhook_events.create_index([("status", 1), ("processing_started_at", 1)])
+
     logger.info("MongoDB indexes ensured")

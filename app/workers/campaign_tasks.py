@@ -522,10 +522,70 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                 if template_id and ObjectId.is_valid(str(template_id)):
                     tmpl = db.templates.find_one({"_id": ObjectId(str(template_id)), "user_id": user_id})
                     if not tmpl or tmpl.get("status") != "approved" or not tmpl.get("content_sid"):
-                        raise RuntimeError("Template is not approved")
+                        raise RuntimeError("Template is not approved in app library")
                     content_sid = tmpl["content_sid"]
                 if not content_sid:
                     raise RuntimeError("Missing content_sid")
+                # Outside the 24h window, Twilio requires a Meta-approved Content Template.
+                # App-level status=approved is not enough — check Twilio WhatsApp approval.
+                # Do not attempt send while Under Review / Pending / Rejected / Paused.
+                if not is_whatsapp_window_open(lead):
+                    tmpl_name = None
+                    if template_id and ObjectId.is_valid(str(template_id)):
+                        tdoc = db.templates.find_one(
+                            {"_id": ObjectId(str(template_id)), "user_id": user_id},
+                            {"name": 1},
+                        )
+                        if tdoc:
+                            tmpl_name = tdoc.get("name")
+                    try:
+                        info = twilio_service.assert_whatsapp_template_approved_for_out_of_session(
+                            content_sid,
+                            template_name=tmpl_name,
+                        )
+                    except Exception as gate_exc:
+                        from app.services.whatsapp_template_approval import (
+                            WhatsAppTemplateNotApprovedError,
+                            extract_twilio_rest_error,
+                        )
+
+                        t_code, t_msg = extract_twilio_rest_error(gate_exc)
+                        status_for_log = getattr(gate_exc, "whatsapp_status", None)
+                        twilio_service.log_template_send_gate(
+                            recipient_phone=phone,
+                            window_open=False,
+                            template_name=tmpl_name or getattr(gate_exc, "template_name", None),
+                            content_sid=content_sid,
+                            approval_status=status_for_log,
+                            twilio_error_code=t_code or getattr(gate_exc, "twilio_error_code", None),
+                            twilio_error_message=t_msg or getattr(gate_exc, "twilio_error_message", None),
+                            outcome="blocked_not_approved",
+                        )
+                        if isinstance(gate_exc, WhatsAppTemplateNotApprovedError):
+                            raise
+                        raise
+                    if template_id and ObjectId.is_valid(str(template_id)):
+                        db.templates.update_one(
+                            {"_id": ObjectId(str(template_id)), "user_id": user_id},
+                            {
+                                "$set": {
+                                    "whatsapp_approval_status": info.get("whatsapp_status"),
+                                    "whatsapp_category": info.get("whatsapp_category"),
+                                    "whatsapp_approval_checked_at": _utcnow(),
+                                    "updated_at": _utcnow(),
+                                }
+                            },
+                        )
+                    twilio_service.log_template_send_gate(
+                        recipient_phone=phone,
+                        window_open=False,
+                        template_name=tmpl_name or info.get("friendly_name"),
+                        content_sid=content_sid,
+                        approval_status=info.get("whatsapp_status"),
+                        outcome="approved_ok",
+                    )
+                    if not body and info.get("body"):
+                        body = info["body"]
                 result = twilio_service.send_whatsapp(
                     phone,
                     content_sid=content_sid,
@@ -592,7 +652,13 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
             release_send_permit()
 
     except Exception as exc:
-        err = str(exc)[:500]
+        from app.services.whatsapp_template_approval import WhatsAppTemplateNotApprovedError
+
+        err = (
+            exc.user_message()
+            if isinstance(exc, WhatsAppTemplateNotApprovedError)
+            else str(exc)[:500]
+        )
         category = classify_send_error(exc)
         attempts = int(recipient.get("attempt_count") or 1)
         max_r = max(wa_max_retries(), int(getattr(settings, "CAMPAIGN_MAX_RETRIES", 3)))
@@ -639,9 +705,50 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                     str(recipient["_id"]),
                 )
         else:
+            from app.services.whatsapp_template_approval import (
+                WhatsAppTemplateNotApprovedError,
+                is_template_approval_error_code,
+            )
+
             err_l = err.lower()
             error_code = category
-            if (
+            if isinstance(exc, WhatsAppTemplateNotApprovedError):
+                final_status = "skipped"
+                error_code = exc.error_code
+                err = exc.user_message()
+                try:
+                    from app.services.activity import record_activity_sync
+                    from app.services.whatsapp_template_approval import mask_content_sid as _mask_sid
+
+                    record_activity_sync(
+                        db,
+                        tenant_id=user_id,
+                        event_type="campaign.template_not_approved",
+                        summary=(
+                            f"Template '{exc.template_name or 'unknown'}' "
+                            f"{exc.display_status()} — closed-window recipient skipped"
+                        ),
+                        actor_id=user_id,
+                        resource_type="campaign",
+                        resource_id=campaign_id,
+                        metadata={
+                            "recipient_id": str(recipient["_id"]),
+                            "phone_suffix": (phone or "")[-6:],
+                            "template_name": exc.template_name,
+                            "content_sid_masked": _mask_sid(exc.content_sid),
+                            "whatsapp_status": exc.whatsapp_status,
+                            "error_code": exc.error_code,
+                            "window_open": False,
+                        },
+                    )
+                except Exception:
+                    pass
+            elif is_template_approval_error_code(category) or is_template_approval_error_code(
+                getattr(exc, "error_code", None)
+            ):
+                final_status = "skipped"
+                error_code = getattr(exc, "error_code", None) or category
+            elif (
                 "skipped_closed_window" in err_l
                 or category == "window_closed"
                 or WINDOW_CLOSED_ERROR.lower() in err_l
@@ -656,6 +763,28 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                     error_code = "skipped_closed_window"
             elif category in ("consent_blocked", "consent_required") or "blacklist" in err_l or "opt" in err_l:
                 final_status = "skipped"
+            elif category == "template_error" and any(
+                x in err_l for x in ("under review", "by meta", "template '", "template_under_review")
+            ):
+                final_status = "skipped"
+                from app.services.whatsapp_template_approval import (
+                    TEMPLATE_UNDER_REVIEW,
+                    TEMPLATE_PENDING,
+                    TEMPLATE_REJECTED,
+                    TEMPLATE_PAUSED,
+                    TEMPLATE_NOT_APPROVED,
+                )
+
+                if "under review" in err_l:
+                    error_code = TEMPLATE_UNDER_REVIEW
+                elif "rejected" in err_l:
+                    error_code = TEMPLATE_REJECTED
+                elif "paused" in err_l:
+                    error_code = TEMPLATE_PAUSED
+                elif "pending" in err_l:
+                    error_code = TEMPLATE_PENDING
+                else:
+                    error_code = TEMPLATE_NOT_APPROVED
             else:
                 final_status = "failed"
             try:

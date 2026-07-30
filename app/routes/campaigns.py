@@ -930,6 +930,73 @@ async def campaign_eligibility_preview(cid: str, user: dict = Depends(current_us
                 counts["other_blocked"] += 1
         if len(counts["samples"]) < 10:
             counts["samples"].append(sample)
+    # Meta WhatsApp template approval gate (closed-window / template sends)
+    from app.services.whatsapp_template_approval import (
+        display_status_label,
+        is_whatsapp_template_sendable,
+        mask_content_sid,
+        normalize_whatsapp_approval_status,
+        status_emoji,
+    )
+
+    tmpl_name = None
+    tmpl_sid = sid
+    wa_status = None
+    if tid and ObjectId.is_valid(str(tid)):
+        tdoc = await get_db().templates.find_one({"_id": ObjectId(str(tid)), "user_id": user_id})
+        if tdoc:
+            tmpl_name = tdoc.get("name")
+            tmpl_sid = tdoc.get("content_sid") or tmpl_sid
+            wa_status = tdoc.get("whatsapp_approval_status")
+    if tmpl_sid:
+        try:
+            from app.services import twilio_service
+
+            info = twilio_service.get_content_template_info(str(tmpl_sid))
+            wa_status = info.get("whatsapp_status")
+            tmpl_name = tmpl_name or info.get("friendly_name")
+            if tid and ObjectId.is_valid(str(tid)):
+                await get_db().templates.update_one(
+                    {"_id": ObjectId(str(tid)), "user_id": user_id},
+                    {
+                        "$set": {
+                            "whatsapp_approval_status": wa_status,
+                            "whatsapp_category": info.get("whatsapp_category"),
+                            "whatsapp_approval_checked_at": utcnow(),
+                            "updated_at": utcnow(),
+                        }
+                    },
+                )
+        except Exception:
+            pass
+    wa_norm = normalize_whatsapp_approval_status(wa_status) if wa_status else None
+    template_approved = is_whatsapp_template_sendable(wa_status) if wa_status else False
+    needs_template = scope in ("all_eligible_recipients", "template_only") or (
+        not is_ai_campaign(doc) and has_template
+    )
+    counts["template_meta"] = {
+        "name": tmpl_name,
+        "content_sid": tmpl_sid,
+        "content_sid_masked": mask_content_sid(tmpl_sid),
+        "whatsapp_approval_status": wa_norm,
+        "whatsapp_approval_label": display_status_label(wa_norm) if wa_norm else None,
+        "whatsapp_approval_emoji": status_emoji(wa_norm) if wa_norm else None,
+        "whatsapp_sendable": template_approved,
+        "warning_required": bool(needs_template and tmpl_sid and wa_norm and not template_approved),
+        "warning_message": (
+            "The selected WhatsApp template has not yet been approved by Meta.\n\n"
+            "Recipients outside the 24-hour WhatsApp window will be skipped."
+            if needs_template and tmpl_sid and wa_norm and not template_approved
+            else None
+        ),
+    }
+    if wa_norm and not template_approved:
+        counts["template_not_approved"] = max(
+            int(counts.get("template_not_approved") or 0),
+            int(counts.get("eligible_template_fallback") or 0)
+            + int(counts.get("eligible_template_static") or 0)
+            + int(counts.get("closed_window") or 0),
+        )
     audit("campaign.eligibility_preview", user_id=user_id, target_id=cid, request_id=get_request_id())
     return {"campaign_id": cid, **counts}
 

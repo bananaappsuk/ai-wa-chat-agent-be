@@ -357,11 +357,95 @@ def test_approved_template_sends_outside_window():
         patch("app.services.idempotency.claim_idempotency", return_value=True),
         patch("app.services.throughput.acquire_send_permit", return_value=True),
         patch("app.services.throughput.release_send_permit"),
+        patch.object(
+            ct.twilio_service,
+            "assert_whatsapp_template_approved_for_out_of_session",
+            return_value={"whatsapp_status": "approved", "body": "Hi", "friendly_name": "t"},
+        ),
+        patch.object(ct.twilio_service, "log_template_send_gate"),
         patch.object(ct.twilio_service, "send_whatsapp", return_value={"sid": "SMx", "status": "queued"}) as send,
     ):
         ct.send_campaign_recipient(user_id, campaign_id, str(recipient_id))
     send.assert_called_once()
     assert send.call_args.kwargs.get("content_sid") == "HXabc"
+
+
+def test_under_review_template_skips_closed_window_without_send():
+    from app.services.whatsapp_template_approval import (
+        TEMPLATE_UNDER_REVIEW,
+        WhatsAppTemplateNotApprovedError,
+    )
+    from app.workers import campaign_tasks as ct
+
+    user_id = str(ObjectId())
+    campaign_id = str(ObjectId())
+    recipient_id = ObjectId()
+    tmpl_id = ObjectId()
+    db = MagicMock()
+    db.campaigns.find_one = MagicMock(
+        return_value={
+            "_id": ObjectId(campaign_id),
+            "user_id": user_id,
+            "status": "running",
+            "template_id": str(tmpl_id),
+            "content_sid": "HXunder",
+            "content_variables": {},
+        }
+    )
+    recipient = {
+        "_id": recipient_id,
+        "phone": "+447700900077",
+        "status": "processing",
+        "attempt_count": 1,
+    }
+    db.campaign_recipients.find_one_and_update = MagicMock(
+        side_effect=[recipient, {**recipient, "status": "skipped"}]
+    )
+    db.blacklist.find_one = MagicMock(return_value=None)
+    db.leads.find_one = MagicMock(
+        return_value={
+            "phone": "+447700900077",
+            "whatsapp_consent_status": "opted_in",
+            "blacklisted": False,
+        }
+    )
+    db.templates.find_one = MagicMock(
+        return_value={
+            "_id": tmpl_id,
+            "user_id": user_id,
+            "status": "approved",
+            "content_sid": "HXunder",
+            "name": "aisummercamp26",
+        }
+    )
+
+    with (
+        patch.object(ct, "_db", return_value=db),
+        patch.object(ct, "_publish"),
+        patch.object(ct, "_refresh_campaign_counters", return_value={}),
+        patch.object(ct, "_maybe_complete_campaign"),
+        patch("app.services.idempotency.claim_idempotency", return_value=True),
+        patch("app.services.throughput.acquire_send_permit", return_value=True),
+        patch("app.services.throughput.release_send_permit"),
+        patch.object(
+            ct.twilio_service,
+            "assert_whatsapp_template_approved_for_out_of_session",
+            side_effect=WhatsAppTemplateNotApprovedError(
+                whatsapp_status="under_review",
+                content_sid="HXunder",
+                template_name="aisummercamp26",
+            ),
+        ),
+        patch.object(ct.twilio_service, "log_template_send_gate"),
+        patch.object(ct.twilio_service, "send_whatsapp") as send,
+    ):
+        ct.send_campaign_recipient(user_id, campaign_id, str(recipient_id))
+    send.assert_not_called()
+    final_set = db.campaign_recipients.find_one_and_update.call_args_list[-1][0][1]["$set"]
+    assert final_set["status"] == "skipped"
+    assert final_set["error_code"] == TEMPLATE_UNDER_REVIEW
+    assert "Under Review" in final_set["error_message"]
+    assert "aisummercamp26" in final_set["error_message"]
 
 
 def test_pause_prevents_send():

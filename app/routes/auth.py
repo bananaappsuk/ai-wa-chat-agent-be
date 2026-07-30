@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
+from app.billing.user_out import user_out_from_doc
 from app.config import settings
 from app.db.mongo import get_db
 from app.models.user import (
@@ -32,32 +33,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def _user_out(doc: dict) -> UserOut:
-    s = serialize(doc)
-    role = s.get("role") or "user"
-    if role not in ("user", "agent", "moderator", "admin"):
-        role = "user"
-    return UserOut(
-        id=s["id"],
-        email=s["email"],
-        full_name=s.get("full_name") or "",
-        first_name=s.get("first_name"),
-        last_name=s.get("last_name"),
-        display_name=s.get("display_name"),
-        company_name=s.get("company_name"),
-        phone=s.get("phone"),
-        twilio_whatsapp_to=s.get("twilio_whatsapp_to"),
-        timezone=s.get("timezone"),
-        locale=s.get("locale"),
-        avatar_url=s.get("avatar_url"),
-        notification_preferences=s.get("notification_preferences"),
-        plan=s.get("plan", "free"),
-        role=role,
-        banned=bool(s.get("banned", False)),
-        active=s.get("active") is not False,
-        last_login_at=s.get("last_login_at"),
-        created_at=s.get("created_at"),
-        updated_at=s.get("updated_at"),
-    )
+    return user_out_from_doc(doc)
 
 
 def _rate_password(request: Request) -> None:
@@ -94,6 +70,8 @@ async def signup(payload: UserCreate, request: Request) -> TokenOut:
             "maintenance": False,
         },
         "plan": "free",
+        "subscription_status": "none",
+        "cancel_at_period_end": False,
         "role": "admin" if is_first else "user",
         "banned": False,
         "active": True,

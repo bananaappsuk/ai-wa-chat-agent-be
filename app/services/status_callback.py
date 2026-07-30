@@ -183,6 +183,19 @@ async def _update_blast_recipient(
     if new_fail and not old_fail:
         metric_inc["failed_count"] = 1
 
+    # Legacy blasts stored Twilio "queued" as recipient status; that was never
+    # counted in sent_count. When delivery webhooks arrive, promote the counter.
+    counted_as_sent = ("sent", "delivered", "read", "queued", "accepted", "sending")
+    if new_status in ("sent", "delivered", "read") and old_status not in counted_as_sent:
+        metric_inc["sent_count"] = 1
+    elif (
+        new_status in ("delivered", "read")
+        and old_status in ("queued", "accepted", "sending")
+        and int(blast.get("sent_count") or 0) < int(blast.get("total_recipients") or 0)
+    ):
+        # Old bug: queued recipients left sent_count at 0; fix on delivery callback.
+        metric_inc["sent_count"] = 1
+
     old_delivered = old_status in ("delivered", "read")
     new_delivered = new_status in ("delivered", "read")
     if new_delivered and not old_delivered:

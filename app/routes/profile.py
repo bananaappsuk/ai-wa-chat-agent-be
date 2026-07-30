@@ -12,6 +12,7 @@ from app.middleware.auth import current_user, verify_password
 from app.middleware.security import get_request_id
 from app.models.common import serialize, utcnow
 from app.models.user import ProfileUpdate, UserOut
+from app.billing.user_out import user_out_from_doc
 from app.security.audit import audit
 from app.security.rate_limit import rate_limit_upload
 from app.services import twilio_service
@@ -42,32 +43,7 @@ _PROFILE_ALLOW = frozenset(
 
 
 def _user_out(doc: dict) -> UserOut:
-    s = serialize(doc)
-    role = s.get("role") or "user"
-    if role not in ("user", "agent", "moderator", "admin"):
-        role = "user"
-    return UserOut(
-        id=s["id"],
-        email=s["email"],
-        full_name=s.get("full_name") or "",
-        first_name=s.get("first_name"),
-        last_name=s.get("last_name"),
-        display_name=s.get("display_name"),
-        company_name=s.get("company_name"),
-        phone=s.get("phone"),
-        twilio_whatsapp_to=s.get("twilio_whatsapp_to"),
-        timezone=s.get("timezone"),
-        locale=s.get("locale"),
-        avatar_url=s.get("avatar_url"),
-        notification_preferences=s.get("notification_preferences"),
-        plan=s.get("plan", "free"),
-        role=role,
-        banned=bool(s.get("banned", False)),
-        active=s.get("active") is not False,
-        last_login_at=s.get("last_login_at"),
-        created_at=s.get("created_at"),
-        updated_at=s.get("updated_at"),
-    )
+    return user_out_from_doc(doc)
 
 
 def normalize_twilio_whatsapp_to(raw: str | None) -> str | None:

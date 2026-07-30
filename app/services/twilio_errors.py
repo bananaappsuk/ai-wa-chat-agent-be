@@ -23,7 +23,9 @@ _CODE_MAP: dict[str, ErrorCategory] = {
     "21614": "invalid_recipient",
     "21408": "invalid_recipient",
     "21610": "consent_blocked",  # unsubscribed recipient
-    "63016": "window_closed",
+    # 63016 = freeform outside window. Often means Content Template was not
+    # Meta-approved, so Twilio treated the send as freeform.
+    "63016": "template_error",
     "63024": "template_error",
     "63007": "template_error",
     "63032": "media_error",
@@ -76,10 +78,38 @@ def extract_twilio_error_code(exc: BaseException | str) -> Optional[str]:
 
 
 def classify_send_error(exc: BaseException | str) -> ErrorCategory:
+    # Structured Meta approval failures — never treat as window_closed
+    from app.services.whatsapp_template_approval import (
+        WhatsAppTemplateNotApprovedError,
+        is_template_approval_error_code,
+    )
+
+    if isinstance(exc, WhatsAppTemplateNotApprovedError):
+        return "template_error"
+    code_attr = getattr(exc, "error_code", None)
+    if is_template_approval_error_code(str(code_attr) if code_attr else None):
+        return "template_error"
+
     code = extract_twilio_error_code(exc)
     if code and code in _CODE_MAP:
         return _CODE_MAP[code]
     text = str(exc).lower()
+    if is_template_approval_error_code(text.strip()) or any(
+        h in text
+        for h in (
+            "template_under_review",
+            "template_pending",
+            "template_rejected",
+            "template_paused",
+            "template_not_approved",
+            "currently under review by meta",
+            "business-initiated whatsapp messages cannot be sent",
+        )
+    ):
+        return "template_error"
+    # Avoid classifying Meta approval messages that mention "24-hour" as window_closed
+    if "by meta" in text or "content template is not approved" in text:
+        return "template_error"
     if "window" in text or "24-hour" in text or "24 hour" in text:
         return "window_closed"
     if any(h in text for h in ("consent", "opt-out", "opted out", "blacklist", "unsubscribed")):
