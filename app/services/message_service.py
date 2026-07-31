@@ -21,6 +21,14 @@ async def insert_message(
     status: str = "queued",
     twilio_sid: str | None = None,
     error: str | None = None,
+    template_id: str | None = None,
+    content_sid: str | None = None,
+    content_variables: dict | None = None,
+    message_type: str | None = "text",
+    media_items: list | None = None,
+    media_url: str | None = None,
+    media_content_type: str | None = None,
+    media_filename: str | None = None,
 ) -> dict:
     doc = {
         "user_id": user_id,
@@ -28,10 +36,25 @@ async def insert_message(
         "direction": direction,
         "message": message,
         "status": status,
+        "message_type": message_type or "text",
         "twilio_sid": twilio_sid,
         "error": error,
         "created_at": utcnow(),
     }
+    if template_id:
+        doc["template_id"] = template_id
+    if content_sid:
+        doc["content_sid"] = content_sid
+    if content_variables is not None:
+        doc["content_variables"] = content_variables
+    if media_items:
+        doc["media_items"] = media_items
+    if media_url:
+        doc["media_url"] = media_url
+    if media_content_type:
+        doc["media_content_type"] = media_content_type
+    if media_filename:
+        doc["media_filename"] = media_filename
     res = await get_db().messages.insert_one(doc)
     doc["_id"] = res.inserted_id
     await get_db().leads.update_one(

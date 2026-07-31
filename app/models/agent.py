@@ -23,6 +23,8 @@ class AgentCreate(BaseModel):
     tone: Tone = "neutral"
     knowledge_base: Optional[str] = Field(default=None, max_length=10000)
     status: Status = "active"
+    # Safe default True — existing agents remain campaign-capable
+    campaign_enabled: bool = True
     callback_number: Optional[str] = Field(default=None, max_length=20)
     logo_url: Optional[str] = Field(default=None, max_length=500)
     cta_text: Optional[str] = Field(default=None, max_length=120)

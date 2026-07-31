@@ -1,97 +1,140 @@
 # AI WhatsApp Chat Agent — Backend
 
-FastAPI + MongoDB + Redis/RQ + Twilio WhatsApp + OpenAI. Serves the React frontend in `../fe`.
+FastAPI + MongoDB + Redis/RQ + Twilio WhatsApp + OpenAI.
 
-## Run locally
+Supported: **Python 3.12**. Node frontend lives in `../ai-wa-chat-agent-fe` (Node 20).
 
-Prereqs: Python 3.12+, MongoDB (local or Atlas), Redis (local or hosted), a Twilio WhatsApp number/sandbox, an OpenAI API key.
+## Architecture
+
+| Process | Command | Role |
+| --- | --- | --- |
+| API | `sh start.sh` / `uvicorn app.main:app` | HTTP + WebSockets |
+| Worker | `sh start-worker.sh` / `python worker.py` | RQ jobs (send, AI, campaigns) |
+| Scheduler | `sh start-scheduler.sh` / `python scheduler.py` | Due campaigns (Redis lock) |
+
+**Never** run API + worker in the same production process.
+
+## Local startup
 
 ```bash
-cd be
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # fill in the values below
-```
+# Optional local Mongo + Redis
+docker compose up -d
 
-Run the API and worker in two terminals:
-
-```bash
-# terminal 1 — API
+python -m venv .venv
+# Windows: .\.venv\Scripts\activate
 source .venv/bin/activate
+pip install -r requirements-dev.txt
+cp .env.example .env   # fill values
+
+# Terminal 1 — API (dev reload OK locally only)
 uvicorn app.main:app --reload --port 8000
 
-# terminal 2 — RQ worker
-source .venv/bin/activate
+# Terminal 2 — Worker
 python worker.py
+
+# Terminal 3 — optional; in APP_ENV=dev the API runs an inline scheduler by default
+# python scheduler.py
 ```
 
-API: http://localhost:8000 · Health: http://localhost:8000/health · Docs: http://localhost:8000/docs
+Health: `GET /health` · Ready: `GET /ready` · Metrics: `GET /metrics` (token if `METRICS_TOKEN` set)
 
-The first user to sign up via the FE automatically becomes `admin`.
+## Stripe billing
 
-## Environment variables
+Payments-only module: **Checkout (subscription + trial)**, **Customer Portal**, **signed webhooks**, **invoices**. Plan entitlements are defined but **not enforced** yet.
 
-Edit `.env` (see `.env.example`):
+### Environments (`STRIPE_MODE`)
 
-| Name | Required | Example |
+| Mode | When | Keys / prices |
 | --- | --- | --- |
-| `MONGO_URI` | yes | `mongodb+srv://user:pass@cluster.mongodb.net` |
-| `MONGO_DB` | yes | `ai_wa_chat_agent` |
-| `JWT_SECRET` | yes | long random string |
-| `JWT_EXPIRE_MIN` | no | `10080` (7 days) |
-| `CORS_ORIGINS` | yes | `http://localhost:8080,https://your-fe.vercel.app` |
-| `REDIS_URL` | yes | `redis://localhost:6379/0` or your hosted URL |
-| `PUBLIC_BASE_URL` | yes | `https://your-be.onrender.com` (for Twilio signature validation) |
-| `TWILIO_ACCOUNT_SID` | yes | `ACxxxxxxxx` |
-| `TWILIO_AUTH_TOKEN` | yes | from Twilio console |
-| `TWILIO_WHATSAPP_FROM` | yes | `whatsapp:+14155238886` (sandbox) or your number |
-| `TWILIO_VALIDATE_SIGNATURE` | no | `true` in prod, `false` for local webhook testing |
-| `OPENAI_API_KEY` | yes | `sk-...` |
-| `OPENAI_MODEL` | no | `gpt-4o-mini` |
-| `OPENAI_MAX_HISTORY` | no | `20` |
+| `test` | default for `dev` / `test` / `staging` | `STRIPE_TEST_*` |
+| `live` | **required** when `APP_ENV=production` | `STRIPE_LIVE_*` |
 
-## Test the WhatsApp webhook locally
+- Production **fails startup** if `STRIPE_MODE` is not `live`, or redirect URLs use localhost/tunnels, or live Price IDs are missing.
+- Development **rejects** `sk_live_` unless `STRIPE_ALLOW_LIVE_IN_DEV=true`.
+- Legacy `STRIPE_SECRET_KEY` / `STRIPE_PRICE_*` still work as fallbacks (deprecated).
 
-Twilio needs a public URL. Easiest path is `ngrok`:
+Frontend may expose only the **publishable** key (optional for hosted Checkout redirects). `VITE_STRIPE_PUBLISHABLE_KEY` is optional when using hosted Checkout.
+
+### Create Products / Prices
 
 ```bash
-ngrok http 8000
-# then in Twilio Console set the WhatsApp inbound webhook to:
-#   https://<your-ngrok>.ngrok-free.app/api/webhook/whatsapp   (POST)
+python -m scripts.setup_stripe_products --mode test --dry-run
+python -m scripts.setup_stripe_products --mode test
+python -m scripts.setup_stripe_products --mode live --confirm-live
 ```
 
-Set `TWILIO_VALIDATE_SIGNATURE=false` if signature validation fails locally (ngrok URL mismatch).
+Paste printed `STRIPE_TEST_PRICE_*` or `STRIPE_LIVE_PRICE_*` into `.env`. Never commit real IDs into `.env.example`.
 
-## Project layout
+### Indexes / integrity
 
-```
-be/
-  app/
-    main.py            FastAPI app + lifespan + CORS
-    config.py          pydantic-settings
-    db/mongo.py        Motor client + indexes
-    middleware/auth.py JWT (python-jose) + bcrypt
-    models/            pydantic schemas
-    services/          twilio, openai, leads, messages, ws_manager
-    routes/            auth, profile, leads, messages, agents, campaigns,
-                       admin, blacklist, dashboard, webhook, ws
-    workers/queue.py   RQ + Redis init
-    workers/tasks.py   sync tasks: outbound send, AI reply, blast send
-  worker.py            RQ worker entrypoint
-  Dockerfile
-  requirements.txt
-  .env.example
+```bash
+python -m scripts.report_duplicate_stripe_customers   # before unique indexes on dirty data
+python -m scripts.init_indexes
+python -m scripts.backfill_billing_fields --dry-run
 ```
 
-## Deploy (Render — Docker)
+### Local webhooks (CLI secret ≠ Dashboard secret)
 
-You need **3 services**:
+```bash
+stripe listen --forward-to localhost:8000/api/billing/webhook
+```
 
-1. **Web service** — Docker, source = this repo, health check `/health`. Don't set `PORT` (Render injects it; the Dockerfile honors `$PORT`).
-2. **Background worker** — same Dockerfile, override start command to `python worker.py`.
-3. **Redis (Key Value)** — wire its connection string into `REDIS_URL` on both services above.
+Put the CLI `whsec_…` into `STRIPE_TEST_WEBHOOK_SECRET` (or legacy `STRIPE_WEBHOOK_SECRET`).
 
-Set every required env var on **both** the web service and the worker. Set the Twilio webhook URL to `https://<your-be>.onrender.com/api/webhook/whatsapp`.
+**Production webhook:** `https://<api-host>/api/billing/webhook` with **live** signing secret.
 
-> MongoDB Atlas: add `0.0.0.0/0` to the IP allowlist (Render Starter has no static egress).
+Subscribe at least to:
+
+- `checkout.session.completed`, `checkout.session.expired`
+- `customer.subscription.created|updated|deleted|trial_will_end`
+- `invoice.finalized`, `invoice.paid`, `invoice.payment_failed`, `invoice.payment_action_required`
+
+### Customer Portal (Dashboard)
+
+Settings → Billing → Customer portal — enable:
+
+- Payment method update
+- Invoice history / receipts
+- Cancel subscription (prefer **at period end**)
+- Switch plans among Starter / Professional / Business products
+- Configure proration as desired
+
+### Manual UAT
+
+1. `STRIPE_MODE=test`, restart API + FE.
+2. Run Stripe CLI forwarder; use CLI webhook secret.
+3. Sign up → Billing → Choose Professional → test card `4242…`.
+4. Confirm Mongo user `plan` / `subscription_status` after webhooks.
+5. Manage Subscription → change plan / cancel at period end.
+6. Trigger failed payment in Stripe test clock / bad card; confirm `past_due` UI warning.
+
+### Key rotation
+
+Rotate secret + webhook secret in Stripe Dashboard, update env, restart API. Never reuse CLI webhook secrets in production. Verify production never has `sk_test_` / `pk_test_`.
+
+### Endpoints
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/billing/plans` | Public catalog + `stripe_mode` |
+| GET | `/api/billing/subscription` | Current plan / status (JWT) |
+| GET | `/api/billing/invoices` | Payment history (JWT, paginated) |
+| POST | `/api/billing/checkout` | `{ "plan": "professional" }` → Checkout URL |
+| POST | `/api/billing/portal` | Customer Portal URL |
+| POST | `/api/billing/webhook` | Stripe signature required |
+
+Frontend: `/billing` and landing `#pricing`. Admin paid-plan override requires `manual_override=true` and does **not** create Stripe subscriptions.
+
+### Admin plan override
+
+`POST /api/admin/users/{id}/plan` with body `{ "plan": "professional", "manual_override": true }` for Stripe-backed plans. Prefer Checkout/Portal for real billing.
+
+## Minimum environment variables
+
+See `.env.example`. Critical: `MONGO_URI`, `MONGO_DB`, `JWT_SECRET`, `REDIS_URL`, `CORS_ORIGINS`, Twilio vars, `PUBLIC_BASE_URL` (staging/prod), `OPENAI_API_KEY` when AI enabled.
+
+## Docs
+
+- [DEPLOYMENT.md](DEPLOYMENT.md) — staging/production
+- [OPERATIONS.md](OPERATIONS.md) — runbooks
+- [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) — release safety

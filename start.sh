@@ -1,21 +1,19 @@
 #!/usr/bin/env sh
-# Run the API and the RQ worker in one container.
-# If EITHER process dies, bring the other down and exit non-zero so Render
-# restarts the whole container — a dead worker must never go unnoticed.
+# Production API entrypoint — does NOT start the RQ worker.
+# Run worker and scheduler as separate services.
+set -eu
 
-python worker.py &
-WORKER_PID=$!
+PORT="${PORT:-8000}"
+KEEPALIVE="${KEEP_ALIVE_SECONDS:-75}"
+GRACEFUL="${GRACEFUL_SHUTDOWN_SECONDS:-30}"
+WORKERS="${WEB_CONCURRENCY:-1}"
 
-uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}" &
-API_PID=$!
-
-# Forward Render's shutdown signal to both children.
-trap 'kill "$WORKER_PID" "$API_PID" 2>/dev/null; exit 0' INT TERM
-
-# Poll: as soon as one child is gone, take the other down and exit to trigger restart.
-while kill -0 "$WORKER_PID" 2>/dev/null && kill -0 "$API_PID" 2>/dev/null; do
-  sleep 5
-done
-
-kill "$WORKER_PID" "$API_PID" 2>/dev/null
-exit 1
+# WebSockets: prefer a single worker unless sticky sessions are configured.
+exec uvicorn app.main:app \
+  --host 0.0.0.0 \
+  --port "$PORT" \
+  --workers "$WORKERS" \
+  --timeout-keep-alive "$KEEPALIVE" \
+  --timeout-graceful-shutdown "$GRACEFUL" \
+  --proxy-headers \
+  --forwarded-allow-ips='*'
