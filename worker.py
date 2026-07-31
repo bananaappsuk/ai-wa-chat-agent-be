@@ -63,8 +63,12 @@ if __name__ == "__main__":
         conn = get_redis()
         queues = _listen_queues(conn)
         names = [q.name for q in queues]
-        w = WorkerCls(queues, connection=conn)
+        # job_monitoring_interval raised from the 30s default to cut idle heartbeat
+        # commands (matters on Upstash's metered free tier).
+        w = WorkerCls(queues, connection=conn, job_monitoring_interval=90)
         logger.info("RQ worker listening queues=%s", ",".join(names))
+        # with_scheduler=True is required: retries and campaign batching enqueue jobs
+        # with enqueue_in (RQ scheduled registry). Do not disable.
         w.work(with_scheduler=True)
     except Exception as exc:
         capture_exception(exc, service="worker")

@@ -38,7 +38,7 @@ def _redis() -> Redis:
     if _redis_client is None:
         _redis_client = Redis.from_url(
             settings.REDIS_URL,
-            health_check_interval=30,
+            health_check_interval=60,
             socket_keepalive=True,
             retry_on_timeout=True,
         )
