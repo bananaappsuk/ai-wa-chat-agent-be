@@ -223,6 +223,7 @@ async def test_webhook_ignores_self_sender_and_skips_lead_creation():
         patch.object(wh, "get_db", return_value=db),
         patch("app.security.rate_limit.rate_limit_webhook"),
         patch.object(wh.twilio_service, "validate_signature", return_value=True),
+        patch("app.services.inbound_whatsapp.recalculate_lead_score", new=AsyncMock()),
     ):
         resp = await wh.whatsapp_webhook(_FakeRequest(form_data))
 
@@ -268,11 +269,11 @@ async def test_webhook_processes_normal_inbound_when_not_self_sender():
         patch.object(wh, "get_db", return_value=db),
         patch("app.security.rate_limit.rate_limit_webhook"),
         patch.object(wh.twilio_service, "validate_signature", return_value=True),
-        patch.object(wh.lead_service, "find_or_create_by_phone", new=AsyncMock(return_value=lead_doc)),
-        patch.object(wh.lead_service, "get_lead", new=AsyncMock(return_value=lead_doc)),
-        patch.object(wh.lead_service, "ai_suppressed", return_value=True),
-        patch.object(wh, "recalculate_lead_score", new=AsyncMock()),
-        patch.object(wh.ws_manager, "push", new=AsyncMock()),
+        patch("app.services.inbound_whatsapp.lead_service.find_or_create_by_phone", new=AsyncMock(return_value=lead_doc)),
+        patch("app.services.inbound_whatsapp.lead_service.get_lead", new=AsyncMock(return_value=lead_doc)),
+        patch("app.services.inbound_whatsapp.lead_service.ai_suppressed", return_value=True),
+        patch("app.services.inbound_whatsapp.recalculate_lead_score", new=AsyncMock()),
+        patch("app.services.inbound_whatsapp.ws_manager.push", new=AsyncMock()),
         patch.object(wh, "enqueue") as enq,
     ):
         resp = await wh.whatsapp_webhook(_FakeRequest(form_data))

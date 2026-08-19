@@ -1,11 +1,13 @@
-"""Meta WhatsApp Cloud API webhooks (Phase 1 POC — verify + log only)."""
+"""Meta WhatsApp Cloud API webhooks (verify + Phase 2A inbound CRM)."""
 from __future__ import annotations
 
 import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
+from app.db.mongo import get_db
 from app.services import meta_whatsapp_service
+from app.services.inbound_whatsapp import InboundMessage, process_inbound_message
 
 router = APIRouter(tags=["webhook-meta"])
 logger = logging.getLogger(__name__)
@@ -30,8 +32,8 @@ async def meta_whatsapp_webhook(request: Request) -> dict:
     """
     Accept Meta inbound + status webhooks.
 
-    Phase 1: verify signature, parse, log safe fields, return 200.
-    Does not write Mongo or enqueue AI/campaigns.
+    Phase 2A: persist inbound text to CRM/Live Chat. Statuses remain log-only.
+    Does not send Meta outbound or enqueue AI.
     """
     from app.security.rate_limit import rate_limit_webhook
 
@@ -56,10 +58,10 @@ async def meta_whatsapp_webhook(request: Request) -> dict:
 
     messages = meta_whatsapp_service.parse_inbound_messages(payload)
     statuses = meta_whatsapp_service.parse_status_updates(payload)
+    db = get_db()
 
     for msg in messages:
         text_len = len(msg.text) if msg.text is not None else 0
-        # Avoid logging full message bodies in production-like; length is enough for POC proof.
         logger.info(
             "meta_inbound provider=%s message_id=%s phone_number_id=%s from=%s "
             "message_type=%s text_len=%s timestamp=%s",
@@ -71,6 +73,28 @@ async def meta_whatsapp_webhook(request: Request) -> dict:
             text_len,
             msg.timestamp,
         )
+        try:
+            await process_inbound_message(
+                InboundMessage(
+                    provider="meta",
+                    provider_message_id=msg.provider_message_id or "",
+                    customer_phone=msg.from_number or "",
+                    business_identifier=msg.phone_number_id or "",
+                    body=(msg.text or "").strip(),
+                    profile_name=msg.profile_name,
+                    timestamp=msg.timestamp,
+                    message_type=msg.message_type or "text",
+                    skip_provider_outbound=True,
+                    skip_ai_jobs=True,
+                    business_display_phone=msg.display_phone_number,
+                ),
+                db=db,
+            )
+        except Exception:
+            logger.exception(
+                "meta_inbound process failed message_id=%s",
+                (msg.provider_message_id or "")[:80],
+            )
 
     for st in statuses:
         err_codes = [

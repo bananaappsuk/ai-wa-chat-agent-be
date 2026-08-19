@@ -40,6 +40,8 @@ class InboundWhatsAppMessage:
     text: str | None = None
     timestamp: str | None = None
     raw_type: str | None = None
+    profile_name: str | None = None
+    display_phone_number: str | None = None
 
 
 @dataclass(frozen=True)
@@ -237,6 +239,17 @@ def parse_inbound_messages(payload: dict[str, Any]) -> list[InboundWhatsAppMessa
                 continue
             metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
             phone_number_id = str(metadata.get("phone_number_id") or "")
+            display_raw = metadata.get("display_phone_number")
+            display_phone = str(display_raw).strip() if display_raw else None
+            name_by_wa: dict[str, str] = {}
+            for contact in value.get("contacts") or []:
+                if not isinstance(contact, dict):
+                    continue
+                wa_id = str(contact.get("wa_id") or "").strip()
+                profile = contact.get("profile") if isinstance(contact.get("profile"), dict) else {}
+                cname = profile.get("name")
+                if wa_id and cname:
+                    name_by_wa[wa_id] = str(cname)
             for msg in value.get("messages") or []:
                 if not isinstance(msg, dict):
                     continue
@@ -248,6 +261,7 @@ def parse_inbound_messages(payload: dict[str, Any]) -> list[InboundWhatsAppMessa
                         text_body = str(text_body)
                 from_raw = str(msg.get("from") or "")
                 from_norm = normalize_meta_phone(from_raw) or from_raw
+                profile_name = name_by_wa.get(from_raw) or name_by_wa.get(from_raw.lstrip("+"))
                 out.append(
                     InboundWhatsAppMessage(
                         provider="meta",
@@ -258,6 +272,8 @@ def parse_inbound_messages(payload: dict[str, Any]) -> list[InboundWhatsAppMessa
                         text=text_body,
                         timestamp=str(msg.get("timestamp")) if msg.get("timestamp") is not None else None,
                         raw_type=msg_type,
+                        profile_name=profile_name,
+                        display_phone_number=display_phone,
                     )
                 )
     return out
