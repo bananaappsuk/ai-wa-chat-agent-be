@@ -1041,6 +1041,7 @@ def _process_blast_recipient(
     user_id: str,
     recipient: dict,
     *,
+    blast: Optional[dict] = None,
     body: Optional[str],
     media_url: Optional[str],
     content_sid: Optional[str],
@@ -1057,6 +1058,22 @@ def _process_blast_recipient(
     )
     if not updated:
         return
+    from app.services.campaign_provider import classify_bulk_send_error, stored_provider
+
+    blast = blast or {}
+    camp_prov = stored_provider(blast)
+    if camp_prov == "meta" and (updated.get("provider_message_id") or "").strip():
+        db.blast_recipients.update_one(
+            {"_id": recipient["_id"]},
+            {
+                "$set": {
+                    "status": "sent",
+                    "provider": "meta",
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+        return
     phone = updated["phone"]
     norm_phone = normalize_e164(phone) or phone
 
@@ -1067,9 +1084,10 @@ def _process_blast_recipient(
             lead=lead or {"phone": norm_phone, "blacklisted": is_blacklisted},
             phone=norm_phone,
             purpose=purpose,
-            has_template=bool(content_sid),
-            has_media=bool(media_url) and not content_sid,
+            has_template=bool(content_sid) or camp_prov == "meta",
+            has_media=bool(media_url) and not content_sid and camp_prov != "meta",
             blacklisted=is_blacklisted,
+            provider=camp_prov,
         )
         if not elig.allowed:
             try:
@@ -1092,7 +1110,50 @@ def _process_blast_recipient(
             return
 
         try:
-            if content_sid:
+            if camp_prov not in ("twilio", "meta"):
+                raise RuntimeError(f"Unknown WhatsApp provider: {camp_prov}")
+            if camp_prov == "meta":
+                from app.services.meta_templates import MetaTemplateError, build_graph_components, is_meta_template_sendable
+
+                tid = blast.get("template_id")
+                tmpl = None
+                if tid and ObjectId.is_valid(str(tid)):
+                    tmpl = db.templates.find_one(
+                        {"_id": ObjectId(str(tid)), "user_id": user_id, "provider": "meta"}
+                    )
+                if not tmpl or not is_meta_template_sendable(tmpl):
+                    raise RuntimeError("This Meta template cannot be sent (not approved or not supported).")
+                try:
+                    components = build_graph_components(
+                        template=tmpl,
+                        content_variables=content_variables or blast.get("content_variables"),
+                    )
+                except MetaTemplateError as exc:
+                    raise RuntimeError(str(exc)) from exc
+                user = db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+                result = send_whatsapp_template(
+                    provider="meta",
+                    to=phone,
+                    name=(tmpl.get("meta_template_name") or blast.get("meta_template_name") or ""),
+                    language_code=(tmpl.get("meta_language_code") or blast.get("meta_language_code") or ""),
+                    components=components,
+                    user=user,
+                )
+                db.blast_recipients.update_one(
+                    {"_id": recipient["_id"]},
+                    {
+                        "$set": {
+                            "status": "sent",
+                            "provider": "meta",
+                            "provider_message_id": result.get("provider_message_id"),
+                            "twilio_sid": None,
+                            "message_purpose": purpose,
+                            "error": None,
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                )
+            elif content_sid:
                 result = twilio_service.send_whatsapp(
                     phone, content_sid=content_sid, content_variables=content_variables
                 )
@@ -1102,25 +1163,26 @@ def _process_blast_recipient(
                     raise RuntimeError("Blast has no message body or media")
                 result = twilio_service.send_whatsapp(phone, body=body, media_url=resolved_media)
 
-            provider_status = (result.get("status") or "").strip().lower()
-            app_status = (
-                "sent"
-                if provider_status in ("", "queued", "accepted", "sending")
-                else provider_status
-            )
-            db.blast_recipients.update_one(
-                {"_id": recipient["_id"]},
-                {
-                    "$set": {
-                        "status": app_status,
-                        "provider_status": result.get("status"),
-                        "twilio_sid": result.get("sid"),
-                        "message_purpose": purpose,
-                        "error": None,
-                        "updated_at": datetime.now(timezone.utc),
-                    }
-                },
-            )
+            if camp_prov != "meta":
+                provider_status = (result.get("status") or "").strip().lower()
+                app_status = (
+                    "sent"
+                    if provider_status in ("", "queued", "accepted", "sending")
+                    else provider_status
+                )
+                db.blast_recipients.update_one(
+                    {"_id": recipient["_id"]},
+                    {
+                        "$set": {
+                            "status": app_status,
+                            "provider_status": result.get("status"),
+                            "twilio_sid": result.get("sid"),
+                            "message_purpose": purpose,
+                            "error": None,
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                )
             try:
                 from app.observability.metrics import inc_outbound
 
@@ -1130,7 +1192,7 @@ def _process_blast_recipient(
         finally:
             release_send_permit()
     except Exception as exc:
-        category = classify_send_error(exc)
+        category = classify_bulk_send_error(exc, provider=camp_prov)
         try:
             from app.observability.metrics import inc_outbound, inc_provider_failure
 
@@ -1254,6 +1316,7 @@ def send_blast_messages(user_id: str, blast_id: str) -> None:
             db,
             user_id,
             recipient,
+            blast=fresh or blast,
             body=body,
             media_url=media_url,
             content_sid=content_sid,

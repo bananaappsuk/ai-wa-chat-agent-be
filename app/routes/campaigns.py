@@ -70,6 +70,7 @@ def _summary(doc: dict) -> dict:
         "created_at": out.get("created_at"),
         "updated_at": out.get("updated_at"),
         "template_id": out.get("template_id"),
+        "provider": out.get("provider") or "twilio",
         "fallback_template_id": out.get("fallback_template_id"),
         "message": out.get("message"),
         "recipient_source": out.get("recipient_source"),
@@ -271,7 +272,7 @@ async def _apply_ai_campaign_fields(
             fields["fallback_template_content_sid"] = None
         elif fb_tid:
             # Optional template ignored for open_window_only unless user explicitly set it for future use
-            tid, csid = await _resolve_template(user_id, fb_tid, None)
+            tid, csid = await _resolve_template(user_id, fb_tid, None, content_mode="ai_agent")
             fields["fallback_template_id"] = tid
             fields["fallback_template_content_sid"] = csid
         else:
@@ -282,7 +283,7 @@ async def _apply_ai_campaign_fields(
                 fields["template_id"] = None
                 fields["content_sid"] = None
     elif fb_tid:
-        tid, csid = await _resolve_template(user_id, fb_tid, None)
+        tid, csid = await _resolve_template(user_id, fb_tid, None, content_mode="ai_agent")
         fields["fallback_template_id"] = tid
         fields["fallback_template_content_sid"] = csid
         fields["template_id"] = tid
@@ -316,18 +317,22 @@ async def _get_owned(cid: str, user_id: str) -> dict:
     return doc
 
 
-async def _resolve_template(user_id: str, template_id: Optional[str], media_url: Optional[str]):
-    content_sid = None
-    tid = (template_id or "").strip() or None
-    if tid:
-        if media_url:
-            raise HTTPException(status_code=400, detail="Cannot attach media to template campaigns")
-        from app.routes.templates import get_approved_template
+async def _resolve_template(
+    user_id: str,
+    template_id: Optional[str],
+    media_url: Optional[str],
+    *,
+    content_mode: str = "template",
+):
+    from app.services.campaign_provider import resolve_campaign_template
 
-        tmpl = await get_approved_template(user_id, tid)
-        content_sid = tmpl["content_sid"]
-        tid = str(tmpl["_id"])
-    return tid, content_sid
+    resolved = await resolve_campaign_template(
+        user_id=user_id,
+        template_id=template_id,
+        media_url=media_url,
+        content_mode=content_mode,
+    )
+    return resolved["template_id"], resolved["content_sid"]
 
 
 async def _absolute_media(media_url: Optional[str]) -> Optional[str]:
@@ -386,8 +391,32 @@ async def create_campaign(payload: CampaignCreate, user: dict = Depends(current_
     if (payload.review_mode or "") == "no_manual_review":
         require_permission(user, "campaigns.use_no_review")
 
-    template_id, content_sid = await _resolve_template(user_id, payload.template_id, payload.media_url)
-    media_url = await _absolute_media(payload.media_url) if not content_sid else None
+    from app.services.campaign_provider import resolve_campaign_template
+
+    content_mode = (payload.content_mode or "template").strip().lower() or "template"
+    resolved = await resolve_campaign_template(
+        user_id=user_id,
+        template_id=payload.template_id,
+        media_url=payload.media_url,
+        content_mode=content_mode,
+    )
+    template_id = resolved["template_id"]
+    content_sid = resolved["content_sid"]
+    provider = resolved["provider"]
+    if provider == "meta":
+        if content_mode == "ai_agent":
+            raise HTTPException(
+                status_code=400,
+                detail="AI Agent campaigns cannot use Meta WhatsApp templates in this version.",
+            )
+        if not template_id:
+            raise HTTPException(status_code=400, detail="An approved Meta WhatsApp template is required.")
+        if (payload.media_url or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Media sending is not supported for Meta WhatsApp campaigns or blasts.",
+            )
+    media_url = await _absolute_media(payload.media_url) if not content_sid and provider != "meta" else None
     scheduled = parse_scheduled_at(payload.scheduled_at)
     now = utcnow()
     if scheduled and scheduled > now:
@@ -401,6 +430,8 @@ async def create_campaign(payload: CampaignCreate, user: dict = Depends(current_
     if ai_fields.get("template_id") and not template_id:
         template_id = ai_fields.get("template_id")
         content_sid = ai_fields.get("content_sid")
+    if (ai_fields.get("content_mode") or content_mode) == "ai_agent":
+        provider = "twilio"
 
     doc = {
         "user_id": user_id,
@@ -408,7 +439,10 @@ async def create_campaign(payload: CampaignCreate, user: dict = Depends(current_
         "description": (payload.description or "").strip() or None,
         "message": (payload.message or "").strip() or None,
         "template_id": template_id,
+        "provider": provider,
         "content_sid": content_sid,
+        "meta_template_name": resolved.get("meta_template_name"),
+        "meta_language_code": resolved.get("meta_language_code"),
         "content_variables": payload.content_variables,
         "media_url": media_url,
         "media_content_type": payload.media_content_type,
@@ -515,15 +549,23 @@ async def update_campaign(cid: str, payload: CampaignUpdate, user: dict = Depend
     update.update(ai_fields)
 
     if "template_id" in update or "media_url" in update or "fallback_template_id" in ai_fields:
-        tid, csid = await _resolve_template(
-            user_id,
-            update.get("template_id", doc.get("template_id")),
-            update.get("media_url", doc.get("media_url")),
+        from app.services.campaign_provider import resolve_campaign_template
+
+        mode = (update.get("content_mode") or doc.get("content_mode") or "template")
+        resolved = await resolve_campaign_template(
+            user_id=user_id,
+            template_id=update.get("template_id", doc.get("template_id")),
+            media_url=update.get("media_url", doc.get("media_url")),
+            content_mode=str(mode),
         )
+        tid, csid = resolved["template_id"], resolved["content_sid"]
         if "template_id" in payload.model_dump(exclude_unset=True) or tid:
             update["template_id"] = tid
             update["content_sid"] = csid
-        if csid:
+            update["provider"] = resolved["provider"]
+            update["meta_template_name"] = resolved.get("meta_template_name")
+            update["meta_language_code"] = resolved.get("meta_language_code")
+        if resolved["provider"] == "meta" or csid:
             update["media_url"] = None
         elif "media_url" in update:
             update["media_url"] = await _absolute_media(update.get("media_url"))
@@ -618,6 +660,28 @@ async def start_campaign(
             detail="Marketing campaigns require confirm_marketing=true before launch",
         )
 
+    from app.services.campaign_provider import stored_provider
+    from app.services.meta_templates import assert_poc_meta_template_tenant
+
+    camp_provider = stored_provider(doc)
+    if camp_provider == "meta":
+        if is_ai_campaign(doc):
+            raise HTTPException(
+                status_code=400,
+                detail="AI Agent campaigns cannot use Meta WhatsApp templates in this version.",
+            )
+        if not (doc.get("template_id") and doc.get("meta_template_name") and doc.get("meta_language_code")):
+            raise HTTPException(
+                status_code=400,
+                detail="Meta campaigns require an approved Meta WhatsApp template with a language code.",
+            )
+        if doc.get("media_url"):
+            raise HTTPException(
+                status_code=400,
+                detail="Media sending is not supported for Meta WhatsApp campaigns or blasts.",
+            )
+        assert_poc_meta_template_tenant(user)
+
     # Block launch when nobody can be sent (avoids "Completed" with 0 sent).
     pending = await get_db().campaign_recipients.count_documents(
         {"campaign_id": cid, "user_id": user_id, "status": {"$in": ["pending", "queued"]}}
@@ -668,7 +732,8 @@ async def start_campaign(
                 lead=lead or {"phone": r.get("phone")},
                 phone=r.get("phone"),
                 purpose="campaign",
-                has_template=has_template,
+                has_template=has_template or camp_provider == "meta",
+                provider=camp_provider,
             )
             if elig.allowed:
                 eligible += 1
@@ -1618,21 +1683,36 @@ async def create_blast(payload: BlastCreate, user: dict = Depends(current_user))
     message = (payload.message or "").strip() or None
     media_url = (payload.media_url or "").strip() or None
     purpose = (payload.message_purpose or "").strip().lower() or None
+    provider = "twilio"
+    meta_template_name = None
+    meta_language_code = None
 
     if template_id:
-        from app.routes.templates import get_approved_template
+        from app.services.campaign_provider import resolve_campaign_template
 
         if media_url:
             raise HTTPException(
                 status_code=400,
                 detail="Cannot attach media to template blasts",
             )
-        tmpl = await get_approved_template(user_id, template_id)
-        content_sid = tmpl["content_sid"]
-        template_id = str(tmpl["_id"])
-        if not message:
-            message = f"Template: {tmpl.get('name') or content_sid}"
-        # Templates need an explicit purpose (same rule as Live Chat).
+        resolved = await resolve_campaign_template(
+            user_id=user_id,
+            template_id=template_id,
+            media_url=media_url,
+            content_mode="template",
+        )
+        provider = resolved["provider"]
+        template_id = resolved["template_id"]
+        content_sid = resolved["content_sid"]
+        meta_template_name = resolved.get("meta_template_name")
+        meta_language_code = resolved.get("meta_language_code")
+        if provider == "meta":
+            if not template_id:
+                raise HTTPException(status_code=400, detail="An approved Meta WhatsApp template is required.")
+            media_url = None
+            message = message or f"Template: {meta_template_name}"
+        elif not message:
+            message = f"Template: {content_sid}"
         if not purpose or purpose not in TEMPLATE_ALLOWED_PURPOSES:
             raise HTTPException(
                 status_code=400,
@@ -1647,7 +1727,6 @@ async def create_blast(payload: BlastCreate, user: dict = Depends(current_user))
                 status_code=400,
                 detail="Provide message text, media_url, or an approved template_id",
             )
-        # Free-form defaults to conversational (not marketing) so sandbox tests work.
         purpose = purpose or "conversational"
         if purpose not in TEMPLATE_ALLOWED_PURPOSES:
             raise HTTPException(
@@ -1665,9 +1744,12 @@ async def create_blast(payload: BlastCreate, user: dict = Depends(current_user))
         "name": payload.name.strip(),
         "message": message or (f"[media]" if media_url else ""),
         "template_id": template_id,
+        "provider": provider,
         "content_sid": content_sid,
+        "meta_template_name": meta_template_name,
+        "meta_language_code": meta_language_code,
         "content_variables": content_variables,
-        "media_url": media_url if not content_sid else None,
+        "media_url": media_url if not content_sid and provider != "meta" else None,
         "message_purpose": purpose,
         "total_recipients": len(payload.recipients),
         "sent_count": 0,
@@ -1702,8 +1784,9 @@ async def create_blast(payload: BlastCreate, user: dict = Depends(current_user))
             lead=lead or {"phone": normalized, "blacklisted": normalized in blacklist},
             phone=normalized,
             purpose=purpose,  # type: ignore[arg-type]
-            has_template=bool(content_sid),
+            has_template=bool(content_sid) or provider == "meta",
             blacklisted=normalized in blacklist,
+            provider=provider,
         )
         if not elig.allowed:
             key = elig.reason_code or "blocked"
@@ -1714,6 +1797,7 @@ async def create_blast(payload: BlastCreate, user: dict = Depends(current_user))
             "user_id": user_id,
             "phone": normalized,
             "status": "pending",
+            "provider": provider,
             "message_purpose": purpose,
             "attempt_count": 0,
             "created_at": utcnow(),

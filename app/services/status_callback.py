@@ -53,9 +53,8 @@ async def apply_meta_status_update(
     phone_number_id: Optional[str] = None,
     db=None,
 ) -> dict[str, Any]:
-    """Apply a Meta Cloud API delivery status to one outbound Meta message.
-
-    Never looks up twilio_sid, campaigns, or blasts.
+    """Apply a Meta Cloud API delivery status to one outbound Meta message
+    and matching campaign/blast recipients (by provider_message_id).
     """
     from app.config import settings
 
@@ -71,14 +70,25 @@ async def apply_meta_status_update(
             "direction": "outbound",
         }
     )
-    if not doc:
+    camp_recipients = await db.campaign_recipients.find(
+        {"provider_message_id": wamid, "provider": "meta"}
+    ).to_list(length=20)
+    blast_recipients = await db.blast_recipients.find(
+        {"provider_message_id": wamid}
+    ).to_list(length=20)
+    if not doc and not camp_recipients and not blast_recipients:
         logger.warning(
             "Meta status for unknown wamid suffix=...%s",
             wamid[-8:] if len(wamid) > 8 else "?",
         )
         return {"updated": False, "reason": "unknown"}
 
-    user_id = str(doc.get("user_id") or "")
+    user_id = str(
+        (doc or {}).get("user_id")
+        or (camp_recipients[0].get("user_id") if camp_recipients else "")
+        or (blast_recipients[0].get("user_id") if blast_recipients else "")
+        or ""
+    )
     webhook_pnid = _pnid(phone_number_id)
     user = None
     if user_id and ObjectId.is_valid(user_id):
@@ -110,21 +120,46 @@ async def apply_meta_status_update(
         return {"updated": False, "reason": "unknown_status"}
 
     error_code, error_message = _meta_error_fields(errors)
-    set_fields = build_status_update(
-        doc,
-        incoming,
-        error_code=error_code,
-        error_message=error_message,
-    )
-    if not set_fields:
-        return {"updated": False, "reason": "noop"}
+    applied = False
+    last_doc = None
+    if doc:
+        set_fields = build_status_update(
+            doc,
+            incoming,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        if set_fields:
+            filt = {"_id": doc["_id"], "user_id": doc.get("user_id"), "provider": "meta"}
+            await db.messages.update_one(filt, {"$set": set_fields})
+            last_doc = await db.messages.find_one(filt) or {**doc, **set_fields}
+            if user_id:
+                _publish_best_effort(user_id, "message:updated", serialize(last_doc))
+            applied = True
 
-    filt = {"_id": doc["_id"], "user_id": doc.get("user_id"), "provider": "meta"}
-    await db.messages.update_one(filt, {"$set": set_fields})
-    fresh = await db.messages.find_one(filt) or {**doc, **set_fields}
-    if user_id:
-        _publish_best_effort(user_id, "message:updated", serialize(fresh))
-    return {"updated": True, "reason": "applied", "kind": "message", "doc": fresh}
+    for recipient in camp_recipients:
+        result = await _update_campaign_recipient(
+            db,
+            recipient,
+            status_raw=status_raw,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        applied = applied or result.get("updated", False)
+
+    for recipient in blast_recipients:
+        result = await _update_blast_recipient(
+            db,
+            recipient,
+            status_raw=status_raw,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        applied = applied or result.get("updated", False)
+
+    if not applied:
+        return {"updated": False, "reason": "noop"}
+    return {"updated": True, "reason": "applied", "kind": "message" if doc else "recipient", "doc": last_doc}
 
 
 async def apply_twilio_status_callback(

@@ -112,6 +112,11 @@ class MemColl:
             def limit(self, *_args, **_kwargs):
                 return self
 
+            async def to_list(self, length=None):
+                if length is None:
+                    return list(self._docs)
+                return list(self._docs[: int(length)])
+
             def __aiter__(self):
                 async def _gen():
                     for d in self._docs:
@@ -120,6 +125,32 @@ class MemColl:
                 return _gen()
 
         return _Cur(matches)
+
+    def aggregate(self, pipeline):
+        match = {}
+        group_field = None
+        if pipeline:
+            match = pipeline[0].get("$match") or {}
+            if len(pipeline) > 1:
+                gid = (pipeline[1].get("$group") or {}).get("_id")
+                if isinstance(gid, str) and gid.startswith("$"):
+                    group_field = gid[1:]
+        counts: dict = {}
+        for d in self.docs:
+            if match and not _match(d, match):
+                continue
+            key = d.get(group_field) if group_field else None
+            counts[key] = counts.get(key, 0) + 1
+        rows = [{"_id": k, "n": v} for k, v in counts.items()]
+
+        class _Agg:
+            def __iter__(self):
+                return iter(rows)
+
+            async def to_list(self, length=None):
+                return list(rows)
+
+        return _Agg()
 
     async def find_one(self, query=None, projection=None, **kwargs):
         query = query or {}
@@ -182,6 +213,9 @@ class MemDB:
         self.blacklist = MemColl()
         self.campaign_recipients = MemColl()
         self.campaigns = MemColl()
+        self.blast_recipients = MemColl()
+        self.blast_campaigns = MemColl()
+        self.templates = MemColl()
         self.consent_events = MemColl()
         self.activity_events = MemColl()
         self.notifications = MemColl()
