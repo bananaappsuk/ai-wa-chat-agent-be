@@ -42,6 +42,10 @@ def _sender_ok() -> bool:
     return has_creds and (has_from or has_ms)
 
 
+def _meta_sender_ok() -> bool:
+    return bool((settings.META_ACCESS_TOKEN or "").strip() and (settings.META_PHONE_NUMBER_ID or "").strip())
+
+
 def _window_status(lead: Optional[dict]) -> str:
     if not lead:
         return "unknown"
@@ -60,6 +64,7 @@ def get_whatsapp_send_eligibility(
     has_template: bool = False,
     has_media: bool = False,
     blacklisted: Optional[bool] = None,
+    provider: Optional[str] = None,
 ) -> EligibilityResult:
     """Reusable eligibility check for UI preview and send paths."""
     lead = apply_consent_defaults(dict(lead or {}))
@@ -67,7 +72,11 @@ def get_whatsapp_send_eligibility(
     is_bl = bool(lead.get("blacklisted")) if blacklisted is None else bool(blacklisted)
     phone_val = (phone or lead.get("phone") or "").strip()
     window = _window_status(lead)
-    sender = _sender_ok()
+    prov = (provider or "twilio").strip().lower()
+    if prov == "meta":
+        sender = _meta_sender_ok()
+    else:
+        sender = _sender_ok()
 
     if not sender:
         return EligibilityResult(

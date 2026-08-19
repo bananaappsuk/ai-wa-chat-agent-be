@@ -32,8 +32,8 @@ async def meta_whatsapp_webhook(request: Request) -> dict:
     """
     Accept Meta inbound + status webhooks.
 
-    Phase 2A: persist inbound text to CRM/Live Chat. Statuses remain log-only.
-    Does not send Meta outbound or enqueue AI.
+    Phase 2A/2B: persist inbound text to CRM/Live Chat, then enqueue AI replies.
+    Statuses remain log-only. Welcome/STOP confirmation still skip provider outbound.
     """
     from app.security.rate_limit import rate_limit_webhook
 
@@ -74,7 +74,7 @@ async def meta_whatsapp_webhook(request: Request) -> dict:
             msg.timestamp,
         )
         try:
-            await process_inbound_message(
+            result = await process_inbound_message(
                 InboundMessage(
                     provider="meta",
                     provider_message_id=msg.provider_message_id or "",
@@ -85,7 +85,7 @@ async def meta_whatsapp_webhook(request: Request) -> dict:
                     timestamp=msg.timestamp,
                     message_type=msg.message_type or "text",
                     skip_provider_outbound=True,
-                    skip_ai_jobs=True,
+                    skip_ai_jobs=False,
                     business_display_phone=msg.display_phone_number,
                 ),
                 db=db,
@@ -95,6 +95,38 @@ async def meta_whatsapp_webhook(request: Request) -> dict:
                 "meta_inbound process failed message_id=%s",
                 (msg.provider_message_id or "")[:80],
             )
+            continue
+
+        if result.enqueue_classify and result.user_id and result.lead_id:
+            try:
+                from app.workers.queue import enqueue as _enq
+                from app.workers import ai_tasks
+
+                _enq(
+                    ai_tasks.classify_latest_inbound,
+                    result.user_id,
+                    result.lead_id,
+                    result.body or (msg.text or ""),
+                    queue="default",
+                )
+            except Exception:
+                logger.exception("meta classify enqueue failed")
+
+        if result.enqueue_ai and result.user_id and result.lead_id:
+            try:
+                from app.workers.queue import enqueue
+                from app.workers import tasks
+
+                enqueue(
+                    tasks.generate_and_send_ai_reply,
+                    result.user_id,
+                    result.lead_id,
+                    provider="meta",
+                    trigger_message_id=result.trigger_message_id,
+                    queue="default",
+                )
+            except Exception:
+                logger.exception("meta AI enqueue failed")
 
     for st in statuses:
         err_codes = [

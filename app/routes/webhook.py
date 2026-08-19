@@ -112,7 +112,14 @@ async def whatsapp_webhook(request: Request) -> Response:
             logger.exception("classify enqueue failed")
 
     if result.enqueue_ai and result.user_id and result.lead_id:
-        enqueue(tasks.generate_and_send_ai_reply, result.user_id, result.lead_id, queue="default")
+        enqueue(
+            tasks.generate_and_send_ai_reply,
+            result.user_id,
+            result.lead_id,
+            provider="twilio",
+            trigger_message_id=result.trigger_message_id,
+            queue="default",
+        )
 
     return Response(content="<Response/>", media_type="application/xml")
 

@@ -97,13 +97,28 @@ def assert_meta_send_configured() -> None:
         raise MetaWhatsAppError("META_PHONE_NUMBER_ID is not configured")
 
 
-def send_text(*, to: str, text: str) -> MetaSendResult:
+def resolve_send_phone_number_id(phone_number_id: Optional[str] = None) -> str:
+    """POC: env token + a single Phone Number ID. Mismatch is a hard error."""
+    explicit = (phone_number_id or "").strip()
+    env_id = (settings.META_PHONE_NUMBER_ID or "").strip()
+    if explicit and env_id and explicit != env_id:
+        raise MetaWhatsAppError(
+            "Tenant meta_phone_number_id does not match META_PHONE_NUMBER_ID"
+        )
+    chosen = explicit or env_id
+    if not chosen:
+        raise MetaWhatsAppError("META_PHONE_NUMBER_ID is not configured")
+    return chosen
+
+
+def send_text(*, to: str, text: str, phone_number_id: Optional[str] = None) -> MetaSendResult:
     """
     Send a plain-text WhatsApp message via Meta Cloud API.
 
     POST https://graph.facebook.com/{version}/{phone-number-id}/messages
     """
-    assert_meta_send_configured()
+    if not (settings.META_ACCESS_TOKEN or "").strip():
+        raise MetaWhatsAppError("META_ACCESS_TOKEN is not configured")
     body_text = (text or "").strip()
     if not body_text:
         raise MetaWhatsAppError("Message text is required")
@@ -111,7 +126,7 @@ def send_text(*, to: str, text: str) -> MetaSendResult:
         raise MetaWhatsAppError("Message text exceeds WhatsApp limit (4096 characters)")
 
     to_digits = _to_meta_digits(to)
-    phone_number_id = settings.META_PHONE_NUMBER_ID.strip()
+    phone_number_id = resolve_send_phone_number_id(phone_number_id)
     version = (settings.META_GRAPH_VERSION or "v21.0").strip().lstrip("/")
     url = f"https://graph.facebook.com/{version}/{phone_number_id}/messages"
     payload = {

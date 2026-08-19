@@ -60,6 +60,7 @@ class InboundResult:
     enqueue_classify: bool = False
     enqueue_ai: bool = False
     body: str = ""
+    trigger_message_id: str | None = None
 
 
 def _placeholder_body(message_type: str, body: str, media_meta: dict[str, Any] | None) -> str:
@@ -294,6 +295,7 @@ async def process_inbound_message(
     except DuplicateKeyError:
         return InboundResult(outcome="duplicate", user_id=user_id, lead_id=lead_id)
     msg_doc["_id"] = res.inserted_id
+    trigger_message_id = str(res.inserted_id)
     await ws_manager.push(user_id, "message:new", serialize(msg_doc))
 
     window_fields = inbound_window_fields()
@@ -383,6 +385,7 @@ async def process_inbound_message(
             user_id=user_id,
             lead_id=lead_id,
             body=display_body,
+            trigger_message_id=trigger_message_id,
         )
 
     if optin and settings.WHATSAPP_ALLOW_KEYWORD_REOPTIN:
@@ -401,7 +404,12 @@ async def process_inbound_message(
             await ws_manager.push(user_id, "lead:updated", serialize(lead))
         inc_consent_opt_in()
     elif optin and not settings.WHATSAPP_ALLOW_KEYWORD_REOPTIN:
-        return InboundResult(outcome="optin_ignored", user_id=user_id, lead_id=lead_id)
+        return InboundResult(
+            outcome="optin_ignored",
+            user_id=user_id,
+            lead_id=lead_id,
+            trigger_message_id=trigger_message_id,
+        )
 
     await recalculate_lead_score(user_id, lead_id)
     lead = await lead_service.get_lead(user_id, lead_id) or lead
@@ -431,4 +439,5 @@ async def process_inbound_message(
         enqueue_classify=enqueue_classify,
         enqueue_ai=enqueue_ai,
         body=display_body,
+        trigger_message_id=trigger_message_id,
     )

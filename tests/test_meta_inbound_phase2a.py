@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.services import meta_whatsapp_service
 from app.services.inbound_whatsapp import InboundMessage, process_inbound_message
-from app.workers import ai_tasks, tasks
+from app.workers import tasks
 
 
 @asynccontextmanager
@@ -97,6 +97,29 @@ def _match(doc: dict, query: dict) -> bool:
 class MemColl:
     def __init__(self) -> None:
         self.docs: list[dict] = []
+
+    def find(self, query=None, projection=None, **kwargs):
+        query = query or {}
+        matches = [copy.deepcopy(d) for d in self.docs if not query or _match(d, query)]
+
+        class _Cur:
+            def __init__(self, docs):
+                self._docs = docs
+
+            def sort(self, *args, **kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def __aiter__(self):
+                async def _gen():
+                    for d in self._docs:
+                        yield d
+
+                return _gen()
+
+        return _Cur(matches)
 
     async def find_one(self, query=None, projection=None, **kwargs):
         query = query or {}
@@ -337,18 +360,26 @@ def test_duplicate_wamid_one_message(client, mem, pushes):
     assert len([e for _, e, _ in items if e == "message:new"]) == 1
 
 
-def test_meta_does_not_enqueue_ai_welcome_or_classifier(client, mem, pushes):
+def test_meta_enqueues_ai_not_welcome(client, mem, pushes):
     items, push = pushes
     mem.users.docs.append(_user("PN_A"))
     enq = MagicMock()
-    with patched_meta(mem, push, enqueue=enq):
-        _post_meta(client, _meta_payload(phone_number_id="PN_A", wamid="wamid.NOAI"))
-    assert enq.call_count == 0
-    for call in enq.call_args_list:
-        fn = call.args[0] if call.args else None
-        assert fn is not tasks.generate_and_send_ai_reply
-        assert fn is not tasks.send_welcome_and_terms
-        assert fn is not ai_tasks.classify_latest_inbound
+    with patched_meta(mem, push, enqueue=enq), patch(
+        "app.config.settings.OPENAI_API_KEY", "sk-test"
+    ), patch("app.config.settings.AI_FEATURES_ENABLED", True):
+        _post_meta(client, _meta_payload(phone_number_id="PN_A", wamid="wamid.AI1"))
+    ai_calls = [
+        c for c in enq.call_args_list if c.args and c.args[0] is tasks.generate_and_send_ai_reply
+    ]
+    welcome_calls = [
+        c for c in enq.call_args_list if c.args and c.args[0] is tasks.send_welcome_and_terms
+    ]
+    assert welcome_calls == []
+    assert len(ai_calls) == 1
+    assert ai_calls[0].kwargs.get("provider") == "meta"
+    assert ai_calls[0].kwargs.get("trigger_message_id")
+    assert mem.messages.docs
+    assert ai_calls[0].kwargs["trigger_message_id"] == str(mem.messages.docs[0]["_id"])
 
 
 def test_two_tenants_isolated(client, mem, pushes):

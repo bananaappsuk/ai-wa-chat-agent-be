@@ -9,6 +9,7 @@ from redis import Redis
 
 from app.config import settings
 from app.services import twilio_service, openai_service
+from app.services.whatsapp_outbound import send_whatsapp_text
 from app.services.whatsapp_window import (
     WINDOW_CLOSED_ERROR,
     is_whatsapp_window_open,
@@ -140,6 +141,80 @@ def _schedule_message_retry(message_id: str, user_id: str, lead_id: str, attempt
     return True
 
 
+def _resolve_ai_send_provider(
+    db,
+    user_id: str,
+    lead_id: str,
+    provider: str | None,
+    trigger_message_id: str | None,
+) -> tuple[str | None, str | None, dict | None]:
+    """Resolve send provider from job args + the triggering inbound. Never uses env."""
+    explicit = (provider or "").strip().lower() or None
+    trigger_id = (trigger_message_id or "").strip() or None
+    trigger_doc = None
+    if trigger_id:
+        if not ObjectId.is_valid(trigger_id):
+            logger.warning(
+                "ai_reply invalid trigger_message_id user_id=%s lead_id=%s",
+                user_id,
+                lead_id,
+            )
+            return None, trigger_id, None
+        trigger_doc = db.messages.find_one(
+            {
+                "_id": ObjectId(trigger_id),
+                "user_id": user_id,
+                "lead_id": lead_id,
+                "direction": "inbound",
+            }
+        )
+        if not trigger_doc:
+            logger.warning(
+                "ai_reply trigger message not found user_id=%s lead_id=%s",
+                user_id,
+                lead_id,
+            )
+            return None, trigger_id, None
+        stored = (trigger_doc.get("provider") or "").strip().lower() or None
+        if explicit and stored and explicit != stored:
+            logger.warning(
+                "ai_reply provider conflict explicit=%s stored=%s user_id=%s lead_id=%s",
+                explicit,
+                stored,
+                user_id,
+                lead_id,
+            )
+            return None, trigger_id, trigger_doc
+        resolved = explicit or stored
+        if resolved not in ("twilio", "meta"):
+            logger.warning("ai_reply unknown trigger provider=%s", resolved)
+            return None, trigger_id, trigger_doc
+        return resolved, trigger_id, trigger_doc
+    if explicit in (None, "twilio"):
+        return "twilio", None, None
+    logger.warning(
+        "ai_reply provider=%s without trigger_message_id — refusing send",
+        explicit,
+    )
+    return None, None, None
+
+
+def _classify_ai_outbound_error(exc: BaseException, *, provider: str) -> str:
+    if provider == "meta":
+        from app.services.meta_whatsapp_service import MetaWhatsAppError
+        from app.services.whatsapp_outbound import UnknownWhatsAppProviderError
+
+        if isinstance(exc, UnknownWhatsAppProviderError):
+            return "configuration_error"
+        if isinstance(exc, MetaWhatsAppError):
+            code = exc.status_code
+            if code == 429:
+                return "provider_rate_limited"
+            if code is not None and 400 <= int(code) < 500:
+                return "non_retryable"
+    return classify_send_error(exc)
+
+
 def send_outbound_message(
     message_id: str,
     user_id: str,
@@ -174,12 +249,38 @@ def send_outbound_message(
         _fail_message(db, mid, user_id, "missing phone", reason_code="invalid_recipient")
         return
 
+    msg_provider = (msg.get("provider") or "").strip().lower() or "twilio"
+    if msg_provider not in ("twilio", "meta"):
+        _fail_message(
+            db,
+            mid,
+            user_id,
+            f"Unknown WhatsApp provider: {msg_provider}",
+            reason_code="configuration_error",
+        )
+        return
+    if msg_provider == "meta" and (
+        content_sid
+        or media_url
+        or msg.get("content_sid")
+        or msg.get("media_url")
+    ):
+        _fail_message(
+            db,
+            mid,
+            user_id,
+            "Meta media and templates are not supported yet",
+            reason_code="non_retryable",
+        )
+        return
+
     purpose = msg.get("message_purpose") or "conversational"
     elig = get_whatsapp_send_eligibility(
         lead=lead,
         purpose=purpose,
         has_template=bool(content_sid),
         has_media=bool(media_url),
+        provider=msg_provider,
     )
     if not elig.allowed:
         try:
@@ -219,29 +320,55 @@ def send_outbound_message(
             return
 
         db.messages.update_one({"_id": mid}, {"$set": {"status": "sending", "retry_count": _retry_attempt}})
-        result = twilio_service.send_whatsapp(
-            lead["phone"],
-            body=send_body if not content_sid else None,
-            media_url=resolved_media,
-            content_sid=content_sid,
-            content_variables=content_variables,
-        )
-        provider_status = (result.get("status") or "").strip().lower()
-        app_status = "sent" if provider_status in ("", "queued", "accepted") else provider_status
-        db.messages.update_one(
-            {"_id": mid},
-            {
-                "$set": {
-                    "status": app_status,
-                    "provider_status": result.get("status"),
-                    "twilio_sid": result.get("sid"),
-                    "consent_status_at_send": elig.consent_status,
-                    "window_open_at_send": elig.window_status == "open",
-                    "policy_decision": "allowed",
-                    "sender_number": (settings.TWILIO_WHATSAPP_FROM or "")[:40] or None,
-                }
-            },
-        )
+        if msg_provider == "meta":
+            user = db.users.find_one({"_id": ObjectId(user_id)})
+            result = send_whatsapp_text(
+                provider="meta",
+                to=lead["phone"],
+                text=send_body or "",
+                user=user,
+            )
+            db.messages.update_one(
+                {"_id": mid},
+                {
+                    "$set": {
+                        "status": "sent",
+                        "provider": "meta",
+                        "provider_message_id": result.get("provider_message_id"),
+                        "provider_status": result.get("status"),
+                        "consent_status_at_send": elig.consent_status,
+                        "window_open_at_send": elig.window_status == "open",
+                        "policy_decision": "allowed",
+                    }
+                },
+            )
+        else:
+            result = twilio_service.send_whatsapp(
+                lead["phone"],
+                body=send_body if not content_sid else None,
+                media_url=resolved_media,
+                content_sid=content_sid,
+                content_variables=content_variables,
+            )
+            provider_status = (result.get("status") or "").strip().lower()
+            app_status = "sent" if provider_status in ("", "queued", "accepted") else provider_status
+            sid = result.get("sid")
+            db.messages.update_one(
+                {"_id": mid},
+                {
+                    "$set": {
+                        "status": app_status,
+                        "provider": "twilio",
+                        "provider_status": result.get("status"),
+                        "provider_message_id": sid,
+                        "twilio_sid": sid,
+                        "consent_status_at_send": elig.consent_status,
+                        "window_open_at_send": elig.window_status == "open",
+                        "policy_decision": "allowed",
+                        "sender_number": (settings.TWILIO_WHATSAPP_FROM or "")[:40] or None,
+                    }
+                },
+            )
         updated = db.messages.find_one({"_id": mid})
         if updated:
             _publish(user_id, "message:updated", _serialize(updated))
@@ -252,7 +379,7 @@ def send_outbound_message(
         except Exception:
             pass
     except Exception as exc:
-        category = classify_send_error(exc)
+        category = _classify_ai_outbound_error(exc, provider=msg_provider)
         try:
             from app.observability.metrics import inc_outbound, inc_provider_failure
 
@@ -418,7 +545,12 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
             logger.exception("record_activity_sync failed for welcome send")
 
 
-def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
+def generate_and_send_ai_reply(
+    user_id: str,
+    lead_id: str,
+    provider: str | None = None,
+    trigger_message_id: str | None = None,
+) -> None:
     db = _db()
     lead = db.leads.find_one({"_id": ObjectId(lead_id), "user_id": user_id})
     if not lead:
@@ -430,13 +562,28 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
     from app.services.ai_context import load_conversation_context
     from app.services.notifications import create_notification_sync
 
+    send_provider, trigger_id, trigger_doc = _resolve_ai_send_provider(
+        db, user_id, lead_id, provider, trigger_message_id
+    )
+    if not send_provider:
+        return
+
     user = db.users.find_one({"_id": ObjectId(user_id)})
     ai = resolve_ai_settings(user)
     if not ai.get("enabled"):
         return
 
-    elig = get_whatsapp_send_eligibility(lead=lead, purpose="support", has_template=False)
+    elig = get_whatsapp_send_eligibility(
+        lead=lead, purpose="support", has_template=False, provider=send_provider
+    )
     if not elig.allowed:
+        logger.info(
+            "ai_reply blocked by eligibility user_id=%s lead_id=%s provider=%s reason=%s",
+            user_id,
+            lead_id,
+            send_provider,
+            elig.reason_code,
+        )
         return
     if lead.get("ai_paused") or lead.get("takeover_by"):
         return
@@ -459,7 +606,10 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
         )
         return
 
-    idem = make_idempotency_key("ai", user_id, lead_id, str(lead.get("last_inbound_at") or ""))
+    if trigger_id:
+        idem = make_idempotency_key("ai", user_id, lead_id, trigger_id)
+    else:
+        idem = make_idempotency_key("ai", user_id, lead_id, str(lead.get("last_inbound_at") or ""))
     if not claim_idempotency(user_id, idem):
         try:
             from app.observability.metrics import inc_duplicate_prevented
@@ -469,11 +619,12 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
             pass
         return
 
-    # Inbound moderation on latest customer message
-    last_in = db.messages.find_one(
-        {"user_id": user_id, "lead_id": lead_id, "direction": "inbound"},
-        sort=[("created_at", -1)],
-    )
+    last_in = trigger_doc
+    if last_in is None:
+        last_in = db.messages.find_one(
+            {"user_id": user_id, "lead_id": lead_id, "direction": "inbound"},
+            sort=[("created_at", -1)],
+        )
     inbound_text = (last_in or {}).get("message") or ""
     if ai.get("moderation_enabled"):
         mod_in = moderate_inbound(inbound_text)
@@ -559,8 +710,6 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
             {"_id": ObjectId(lead_id)},
             {"$set": {"last_ai_error_category": cat, "updated_at": datetime.now(timezone.utc)}},
         )
-        # C12/C13: empty/truncated AI responses are hard failures — always mark
-        # needs_human regardless of the generic AI_FAILURE_MARK_NEEDS_HUMAN toggle.
         if settings.AI_FAILURE_MARK_NEEDS_HUMAN or cat in ("empty_response", "truncated_response"):
             db.leads.update_one({"_id": ObjectId(lead_id)}, {"$set": {"needs_human": True}})
         if settings.AI_FAILURE_FALLBACK_ENABLED:
@@ -575,9 +724,6 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
             return
 
     if not reply:
-        # Defensive: reply came back empty even without an exception (e.g. an
-        # empty fallback text setting). Mark needs_human and attempt the same
-        # one-shot fallback via the idempotent Redis key before giving up.
         logger.warning("AI reply empty user_id=%s lead_id=%s", user_id, lead_id)
         db.leads.update_one(
             {"_id": ObjectId(lead_id)},
@@ -620,7 +766,9 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
     lead = db.leads.find_one({"_id": ObjectId(lead_id), "user_id": user_id})
     if not lead:
         return
-    elig = get_whatsapp_send_eligibility(lead=lead, purpose="support", has_template=False)
+    elig = get_whatsapp_send_eligibility(
+        lead=lead, purpose="support", has_template=False, provider=send_provider
+    )
     if (
         not elig.allowed
         or lead.get("ai_paused")
@@ -634,6 +782,8 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
         "direction": "outbound",
         "message": reply,
         "status": "queued",
+        "provider": send_provider,
+        "provider_message_id": None,
         "twilio_sid": None,
         "error": None,
         "message_purpose": "support",
@@ -641,6 +791,7 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
         "agent_id": agent_id,
         "agent_name": agent_name,
         "consent_status_at_send": elig.consent_status,
+        "trigger_message_id": trigger_id,
         "created_at": datetime.now(timezone.utc),
     }
     res = db.messages.insert_one(msg_doc)
@@ -658,7 +809,9 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
         )
         return
 
-    elig = get_whatsapp_send_eligibility(lead=lead, purpose="support", has_template=False)
+    elig = get_whatsapp_send_eligibility(
+        lead=lead, purpose="support", has_template=False, provider=send_provider
+    )
     if not elig.allowed:
         _fail_message(db, res.inserted_id, user_id, elig.safe_message, status="canceled", reason_code=elig.reason_code)
         return
@@ -688,19 +841,26 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
         return
 
     try:
-        result = twilio_service.send_whatsapp(lead["phone"], body=reply)
+        result = send_whatsapp_text(
+            provider=send_provider,
+            to=lead["phone"],
+            text=reply,
+            user=user,
+        )
+        set_fields: dict = {
+            "status": "sent" if send_provider == "meta" else (result.get("status") or "sent"),
+            "provider": send_provider,
+            "provider_message_id": result.get("provider_message_id"),
+            "policy_decision": "allowed",
+        }
+        if send_provider == "twilio":
+            raw_status = (result.get("status") or "sent")
+            set_fields["status"] = raw_status
+            set_fields["twilio_sid"] = result.get("provider_message_id")
         db.messages.update_one(
             {"_id": res.inserted_id},
-            {
-                "$set": {
-                    "status": result.get("status") or "sent",
-                    "twilio_sid": result.get("sid"),
-                    "policy_decision": "allowed",
-                }
-            },
+            {"$set": set_fields},
         )
-        # Successful AI reply clears a previous needs_human / error badge so
-        # the conversation returns to normal automation without a manual click.
         db.leads.update_one(
             {"_id": ObjectId(lead_id)},
             {
@@ -724,13 +884,12 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
         except Exception:
             pass
     except Exception as exc:
-        # Transient Twilio/network errors: keep queued and retry via outbound worker
-        # instead of marking the AI reply Failed immediately.
-        cat = classify_send_error(exc)
+        cat = _classify_ai_outbound_error(exc, provider=send_provider)
         logger.warning(
-            "AI outbound Twilio send failed user_id=%s lead_id=%s cat=%s err=%s",
+            "AI outbound send failed user_id=%s lead_id=%s provider=%s cat=%s err=%s",
             user_id,
             lead_id,
+            send_provider,
             cat,
             str(exc)[:200],
         )
@@ -745,6 +904,7 @@ def generate_and_send_ai_reply(user_id: str, lead_id: str) -> None:
                         "error": None,
                         "last_send_error": str(exc)[:300],
                         "policy_reason": cat,
+                        "provider": send_provider,
                     }
                 },
             )
