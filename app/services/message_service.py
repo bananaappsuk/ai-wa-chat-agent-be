@@ -29,6 +29,9 @@ async def insert_message(
     media_url: str | None = None,
     media_content_type: str | None = None,
     media_filename: str | None = None,
+    provider: str | None = None,
+    sender_type: str | None = None,
+    provider_message_id: str | None = None,
 ) -> dict:
     doc = {
         "user_id": user_id,
@@ -41,6 +44,12 @@ async def insert_message(
         "error": error,
         "created_at": utcnow(),
     }
+    if provider:
+        doc["provider"] = provider
+    if sender_type:
+        doc["sender_type"] = sender_type
+    if provider_message_id is not None:
+        doc["provider_message_id"] = provider_message_id
     if template_id:
         doc["template_id"] = template_id
     if content_sid:

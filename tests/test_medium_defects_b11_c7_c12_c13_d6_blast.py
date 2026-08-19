@@ -625,6 +625,7 @@ async def test_send_message_route_requires_purpose_for_template():
     with (
         patch.object(msg_routes.lead_service, "get_lead", new=AsyncMock(return_value=lead)),
         patch("app.security.rate_limit.rate_limit_send"),
+        patch("app.routes.messages.resolve_lead_whatsapp_provider", new=AsyncMock(return_value="twilio")),
     ):
         with pytest.raises(HTTPException) as exc:
             await msg_routes.send_message(payload, user={"_id": user_id})

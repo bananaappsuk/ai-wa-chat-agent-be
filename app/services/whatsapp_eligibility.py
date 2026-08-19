@@ -170,6 +170,17 @@ def get_whatsapp_send_eligibility(
             sender_configured=True,
         )
     if window != "open":
+        if prov == "meta":
+            return EligibilityResult(
+                False,
+                "window_closed",
+                "The 24-hour customer service window is closed. Meta template sending is not yet available in this version.",
+                consent,
+                window,
+                "clear",
+                template_required=False,
+                sender_configured=True,
+            )
         return EligibilityResult(
             False,
             "window_closed",

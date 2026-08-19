@@ -10,6 +10,7 @@ from app.middleware.auth import current_user, decode_token
 from app.models.message import MessageSend, TEMPLATE_ALLOWED_PURPOSES
 from app.models.common import serialize
 from app.services import message_service, lead_service
+from app.services.inbound_whatsapp import resolve_lead_whatsapp_provider
 from app.services.media import media_fields_from_items
 from app.services.ws_manager import ws_manager
 from app.workers.queue import enqueue
@@ -169,6 +170,8 @@ async def send_message(
     if not lead.get("phone"):
         raise HTTPException(status_code=400, detail="Lead has no phone number")
 
+    provider = await resolve_lead_whatsapp_provider(user_id, payload.lead_id, db=get_db())
+
     idem_key = (idempotency_key or "").strip()
     if idem_key:
         cached = get_idempotency_result(user_id, idem_key)
@@ -192,6 +195,18 @@ async def send_message(
     has_template_request = bool(template_id or content_sid)
     purpose = (payload.message_purpose or "").strip().lower() or None
     tmpl = None
+
+    if provider == "meta":
+        if media_url or media_content_type or media_filename:
+            raise HTTPException(
+                status_code=400,
+                detail="Media sending is not yet supported for Meta WhatsApp conversations.",
+            )
+        if template_id or content_sid or content_variables:
+            raise HTTPException(
+                status_code=400,
+                detail="Templates are not yet supported for Meta WhatsApp conversations.",
+            )
 
     # Live Chat marketing template consent: templates must never silently
     # default to conversational — the caller must pick an explicit, valid purpose.
@@ -235,6 +250,7 @@ async def send_message(
         purpose=purpose,  # type: ignore[arg-type]
         has_template=bool(content_sid),
         has_media=bool(media_url),
+        provider=provider,
     )
     if not elig.allowed:
         inc_policy_blocked(elig.reason_code)
@@ -286,23 +302,25 @@ async def send_message(
         media_url=media_meta.get("media_url"),
         media_content_type=media_meta.get("media_content_type"),
         media_filename=media_meta.get("media_filename"),
+        provider=provider,
+        sender_type="human",
+        provider_message_id=None,
     )
-    # Compliance metadata
-    await get_db().messages.update_one(
-        {"_id": doc["_id"]},
-        {
-            "$set": {
-                "message_purpose": purpose,
-                "template_name": template_name,
-                "consent_status_at_send": elig.consent_status,
-                "window_open_at_send": elig.window_status == "open",
-                "policy_decision": "allowed",
-                "policy_reason": elig.reason_code,
-                "idempotency_key": idem_key or None,
-                "sender_number": (settings.TWILIO_WHATSAPP_FROM or "")[:40] or None,
-            }
-        },
-    )
+    extra_set: dict = {
+        "message_purpose": purpose,
+        "template_name": template_name,
+        "consent_status_at_send": elig.consent_status,
+        "window_open_at_send": elig.window_status == "open",
+        "policy_decision": "allowed",
+        "policy_reason": elig.reason_code,
+        "idempotency_key": idem_key or None,
+        "provider": provider,
+        "sender_type": "human",
+        "provider_message_id": None,
+    }
+    if provider != "meta":
+        extra_set["sender_number"] = (settings.TWILIO_WHATSAPP_FROM or "")[:40] or None
+    await get_db().messages.update_one({"_id": doc["_id"]}, {"$set": extra_set})
     doc = await get_db().messages.find_one({"_id": doc["_id"]}) or doc
     serialized = serialize(doc)
     await ws_manager.push(user_id, "message:new", serialized)
@@ -342,11 +360,15 @@ async def check_eligibility(payload: dict, user: dict = Depends(current_user)) -
     template_id = (payload.get("template_id") or "").strip()
     has_template = bool(template_id or payload.get("content_sid"))
     has_media = bool(payload.get("has_media"))
+    preview_provider = "twilio"
+    if lead_id:
+        preview_provider = await resolve_lead_whatsapp_provider(user_id, lead_id, db=get_db())
     result = get_whatsapp_send_eligibility(
         lead=lead,
         phone=phone or (lead or {}).get("phone"),
         purpose=purpose,
         has_template=has_template,
         has_media=has_media,
+        provider=preview_provider or "twilio",
     )
     return result.to_dict()

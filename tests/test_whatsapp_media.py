@@ -153,6 +153,11 @@ async def test_outbound_media_passed_to_twilio_and_media_only_accepted():
         patch("app.services.whatsapp_eligibility._sender_ok", return_value=True),
         patch.object(
             messages_route,
+            "resolve_lead_whatsapp_provider",
+            new=AsyncMock(return_value="twilio"),
+        ),
+        patch.object(
+            messages_route,
             "get_db",
             return_value=MagicMock(
                 messages=MagicMock(
@@ -194,15 +199,19 @@ async def test_outside_window_media_blocked():
     with patch.object(messages_route.lead_service, "get_lead", new=AsyncMock(return_value=lead)):
         with patch("app.security.rate_limit.rate_limit_send"):
             with patch("app.services.whatsapp_eligibility._sender_ok", return_value=True):
-                with pytest.raises(HTTPException) as exc:
-                    await messages_route.send_message(
-                        MessageSend(
-                            lead_id=str(lead["_id"]),
-                            media_url="https://example.com/x.jpg",
-                            media_content_type="image/jpeg",
-                        ),
-                        user={"_id": ObjectId()},
-                    )
+                with patch(
+                    "app.routes.messages.resolve_lead_whatsapp_provider",
+                    new=AsyncMock(return_value="twilio"),
+                ):
+                    with pytest.raises(HTTPException) as exc:
+                        await messages_route.send_message(
+                            MessageSend(
+                                lead_id=str(lead["_id"]),
+                                media_url="https://example.com/x.jpg",
+                                media_content_type="image/jpeg",
+                            ),
+                            user={"_id": ObjectId()},
+                        )
     assert exc.value.status_code == 400
     assert WINDOW_CLOSED_ERROR in str(exc.value.detail)
 

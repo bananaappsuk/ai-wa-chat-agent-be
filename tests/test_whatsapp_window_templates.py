@@ -79,11 +79,15 @@ async def test_send_message_blocks_free_form_outside_window():
     with patch.object(messages_route.lead_service, "get_lead", new=AsyncMock(return_value=lead)):
         with patch("app.security.rate_limit.rate_limit_send"):
             with patch("app.services.whatsapp_eligibility._sender_ok", return_value=True):
-                with pytest.raises(HTTPException) as exc:
-                    await messages_route.send_message(
-                        MessageSend(lead_id=str(lead["_id"]), message="hello"),
-                        user=user,
-                    )
+                with patch(
+                    "app.routes.messages.resolve_lead_whatsapp_provider",
+                    new=AsyncMock(return_value="twilio"),
+                ):
+                    with pytest.raises(HTTPException) as exc:
+                        await messages_route.send_message(
+                            MessageSend(lead_id=str(lead["_id"]), message="hello"),
+                            user=user,
+                        )
     assert exc.value.status_code == 400
     assert WINDOW_CLOSED_ERROR in str(exc.value.detail)
 
@@ -134,6 +138,11 @@ async def test_send_message_allows_approved_template_outside_window():
         patch.object(messages_route, "enqueue") as enqueue_mock,
         patch("app.security.rate_limit.rate_limit_send"),
         patch("app.services.whatsapp_eligibility._sender_ok", return_value=True),
+        patch.object(
+            messages_route,
+            "resolve_lead_whatsapp_provider",
+            new=AsyncMock(return_value="twilio"),
+        ),
         patch.object(
             messages_route,
             "get_db",

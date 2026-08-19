@@ -441,3 +441,19 @@ async def process_inbound_message(
         body=display_body,
         trigger_message_id=trigger_message_id,
     )
+
+
+async def resolve_lead_whatsapp_provider(user_id: str, lead_id: str, *, db: Any | None = None) -> str:
+    """Latest inbound message.provider for this tenant+lead. Defaults to twilio.
+
+    Never uses WHATSAPP_PROVIDER, outbound rows, or other tenants.
+    """
+    db = db if db is not None else get_db()
+    doc = await db.messages.find_one(
+        {"user_id": user_id, "lead_id": str(lead_id), "direction": "inbound"},
+        sort=[("created_at", -1)],
+    )
+    prov = ((doc or {}).get("provider") or "").strip().lower()
+    if prov == "meta":
+        return "meta"
+    return "twilio"
