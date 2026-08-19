@@ -47,6 +47,23 @@ class Settings(BaseSettings):
     TWILIO_VALIDATE_SIGNATURES: bool | None = None
     TRUSTED_PROXY_COUNT: int = 1
 
+    # WhatsApp transport selector. Default remains Twilio for all existing tenants.
+    # Meta Cloud API POC is additive; set to "meta" only for explicit Meta experiments.
+    WHATSAPP_PROVIDER: str = "twilio"
+
+    # Meta WhatsApp Cloud API (POC) — secrets stay server-side only; never expose to FE.
+    META_ACCESS_TOKEN: str = ""
+    META_PHONE_NUMBER_ID: str = ""
+    META_WABA_ID: str = ""
+    META_APP_ID: str = ""
+    META_APP_SECRET: str = ""
+    META_WEBHOOK_VERIFY_TOKEN: str = ""
+    META_GRAPH_VERSION: str = "v21.0"
+    # When true (default), POST /api/webhook/meta/whatsapp requires valid X-Hub-Signature-256.
+    # Set false only for local debugging; never disable in staging/production.
+    META_WEBHOOK_VALIDATE_SIGNATURE: bool = True
+    META_HTTP_TIMEOUT_SECONDS: float = 30.0
+
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_FALLBACK_MODEL: str = "gpt-4o-mini"
@@ -298,6 +315,18 @@ class Settings(BaseSettings):
         return bool(self.TWILIO_VALIDATE_SIGNATURE)
 
     @property
+    def whatsapp_provider(self) -> str:
+        raw = (self.WHATSAPP_PROVIDER or "twilio").strip().lower()
+        return raw if raw in ("twilio", "meta") else "twilio"
+
+    @property
+    def meta_configured(self) -> bool:
+        return bool(
+            (self.META_ACCESS_TOKEN or "").strip()
+            and (self.META_PHONE_NUMBER_ID or "").strip()
+        )
+
+    @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
@@ -383,6 +412,18 @@ class Settings(BaseSettings):
                 errors.append(
                     "TWILIO_VALIDATE_SIGNATURE / TWILIO_VALIDATE_SIGNATURES must be true "
                     f"when APP_ENV={self.app_env}"
+                )
+
+            if not self.META_WEBHOOK_VALIDATE_SIGNATURE:
+                errors.append(
+                    "META_WEBHOOK_VALIDATE_SIGNATURE must be true "
+                    f"when APP_ENV={self.app_env}"
+                )
+
+            if self.whatsapp_provider == "meta" and not self.meta_configured:
+                errors.append(
+                    "META_ACCESS_TOKEN and META_PHONE_NUMBER_ID are required "
+                    "when WHATSAPP_PROVIDER=meta"
                 )
 
             if self.AI_FEATURES_ENABLED and not (self.OPENAI_API_KEY or "").strip():

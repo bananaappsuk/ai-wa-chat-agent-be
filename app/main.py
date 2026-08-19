@@ -21,6 +21,8 @@ from app.routes import (
     profile,
     admin,
     webhook,
+    meta_webhook,
+    meta_poc,
     blacklist,
     dashboard,
     templates,
@@ -172,6 +174,8 @@ app.include_router(blacklist.router, prefix=api_prefix)
 app.include_router(dashboard.router, prefix=api_prefix)
 app.include_router(admin.router, prefix=api_prefix)
 app.include_router(webhook.router, prefix=api_prefix)
+app.include_router(meta_webhook.router, prefix=api_prefix)
+app.include_router(meta_poc.router, prefix=api_prefix)
 app.include_router(templates.router, prefix=api_prefix)
 app.include_router(media.router, prefix=api_prefix)
 app.include_router(activity.router, prefix=api_prefix)
