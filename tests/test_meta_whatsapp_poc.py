@@ -148,6 +148,7 @@ def test_parse_status_payload():
     assert st.provider_message_id == "wamid.TEST_STATUS_1"
     assert st.status == "delivered"
     assert st.recipient_id == "447700900123"
+    assert st.phone_number_id == "PHONE_NUMBER_ID"
 
 
 def test_invalid_webhook_signature_rejected(client):

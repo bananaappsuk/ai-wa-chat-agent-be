@@ -52,6 +52,7 @@ class InboundWhatsAppStatus:
     recipient_id: str | None = None
     timestamp: str | None = None
     errors: list[dict[str, Any]] = field(default_factory=list)
+    phone_number_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -306,6 +307,8 @@ def parse_status_updates(payload: dict[str, Any]) -> list[InboundWhatsAppStatus]
             value = change.get("value")
             if not isinstance(value, dict):
                 continue
+            metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+            phone_number_id = str(metadata.get("phone_number_id") or "").strip() or None
             for st in value.get("statuses") or []:
                 if not isinstance(st, dict):
                     continue
@@ -319,6 +322,7 @@ def parse_status_updates(payload: dict[str, Any]) -> list[InboundWhatsAppStatus]
                         recipient_id=str(st["recipient_id"]) if st.get("recipient_id") is not None else None,
                         timestamp=str(st.get("timestamp")) if st.get("timestamp") is not None else None,
                         errors=safe_errors,
+                        phone_number_id=phone_number_id,
                     )
                 )
     return out

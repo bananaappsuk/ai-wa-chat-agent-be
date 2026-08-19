@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from app.db.mongo import get_db
 from app.services import meta_whatsapp_service
 from app.services.inbound_whatsapp import InboundMessage, process_inbound_message
+from app.services.status_callback import apply_meta_status_update
 
 router = APIRouter(tags=["webhook-meta"])
 logger = logging.getLogger(__name__)
@@ -33,7 +34,8 @@ async def meta_whatsapp_webhook(request: Request) -> dict:
     Accept Meta inbound + status webhooks.
 
     Phase 2A/2B: persist inbound text to CRM/Live Chat, then enqueue AI replies.
-    Statuses remain log-only. Welcome/STOP confirmation still skip provider outbound.
+    Phase 2D: persist outbound delivery/read/failed statuses onto matching Meta rows.
+    Welcome/STOP confirmation still skip provider outbound.
     """
     from app.security.rate_limit import rate_limit_webhook
 
@@ -129,19 +131,34 @@ async def meta_whatsapp_webhook(request: Request) -> dict:
                 logger.exception("meta AI enqueue failed")
 
     for st in statuses:
-        err_codes = [
-            e.get("code") for e in (st.errors or []) if isinstance(e, dict) and "code" in e
-        ]
-        logger.info(
-            "meta_status provider=%s message_id=%s status=%s recipient_id=%s "
-            "timestamp=%s error_codes=%s",
-            st.provider,
-            st.provider_message_id,
-            st.status,
-            st.recipient_id,
-            st.timestamp,
-            err_codes,
-        )
+        try:
+            err_codes = [
+                e.get("code") for e in (st.errors or []) if isinstance(e, dict) and "code" in e
+            ]
+            logger.info(
+                "meta_status provider=%s message_id=%s status=%s recipient_id=%s "
+                "phone_number_id=%s timestamp=%s error_codes=%s",
+                st.provider,
+                st.provider_message_id,
+                st.status,
+                st.recipient_id,
+                st.phone_number_id,
+                st.timestamp,
+                err_codes,
+            )
+            await apply_meta_status_update(
+                provider_message_id=st.provider_message_id,
+                status_raw=st.status,
+                errors=st.errors,
+                phone_number_id=st.phone_number_id,
+                db=db,
+            )
+        except Exception:
+            logger.exception(
+                "meta_status apply failed message_id=%s",
+                (st.provider_message_id or "")[:80],
+            )
+            continue
 
     if not messages and not statuses:
         logger.info("meta_webhook received payload with no messages/statuses object=%s", payload.get("object"))

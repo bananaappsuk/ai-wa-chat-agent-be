@@ -28,6 +28,105 @@ def _publish_best_effort(user_id: str, event: str, data: dict) -> None:
         logger.exception("Failed to publish %s for user_id=%s", event, user_id)
 
 
+def _meta_error_fields(errors: Optional[list] = None) -> tuple[Optional[str], Optional[str]]:
+    if not errors:
+        return None, None
+    first = next((e for e in errors if isinstance(e, dict)), None)
+    if not first:
+        return None, None
+    code = first.get("code")
+    text = first.get("title") or first.get("message")
+    error_code = str(code).strip() if code is not None and str(code).strip() else None
+    error_message = str(text).strip()[:500] if text is not None and str(text).strip() else None
+    return error_code, error_message
+
+
+def _pnid(value: Any) -> str:
+    return str(value or "").strip()
+
+
+async def apply_meta_status_update(
+    *,
+    provider_message_id: str,
+    status_raw: str,
+    errors: Optional[list] = None,
+    phone_number_id: Optional[str] = None,
+    db=None,
+) -> dict[str, Any]:
+    """Apply a Meta Cloud API delivery status to one outbound Meta message.
+
+    Never looks up twilio_sid, campaigns, or blasts.
+    """
+    from app.config import settings
+
+    wamid = (provider_message_id or "").strip()
+    if not wamid:
+        return {"updated": False, "reason": "empty_id"}
+
+    db = db if db is not None else get_db()
+    doc = await db.messages.find_one(
+        {
+            "provider": "meta",
+            "provider_message_id": wamid,
+            "direction": "outbound",
+        }
+    )
+    if not doc:
+        logger.warning(
+            "Meta status for unknown wamid suffix=...%s",
+            wamid[-8:] if len(wamid) > 8 else "?",
+        )
+        return {"updated": False, "reason": "unknown"}
+
+    user_id = str(doc.get("user_id") or "")
+    webhook_pnid = _pnid(phone_number_id)
+    user = None
+    if user_id and ObjectId.is_valid(user_id):
+        user = await db.users.find_one({"_id": ObjectId(user_id)})
+    user_pnid = _pnid((user or {}).get("meta_phone_number_id"))
+    env_pnid = _pnid(getattr(settings, "META_PHONE_NUMBER_ID", None))
+
+    if webhook_pnid and user_pnid and webhook_pnid != user_pnid:
+        logger.warning(
+            "Meta status PNID mismatch user_id=%s wamid_suffix=...%s",
+            user_id,
+            wamid[-8:] if len(wamid) > 8 else "?",
+        )
+        return {"updated": False, "reason": "pnid_mismatch"}
+    if webhook_pnid and user_pnid and env_pnid and webhook_pnid != env_pnid:
+        logger.warning(
+            "Meta status env PNID mismatch user_id=%s wamid_suffix=...%s",
+            user_id,
+            wamid[-8:] if len(wamid) > 8 else "?",
+        )
+        return {"updated": False, "reason": "pnid_mismatch"}
+
+    incoming = normalize_status(status_raw)
+    if incoming is None:
+        logger.info(
+            "Meta status ignored unknown value wamid_suffix=...%s",
+            wamid[-8:] if len(wamid) > 8 else "?",
+        )
+        return {"updated": False, "reason": "unknown_status"}
+
+    error_code, error_message = _meta_error_fields(errors)
+    set_fields = build_status_update(
+        doc,
+        incoming,
+        error_code=error_code,
+        error_message=error_message,
+    )
+    if not set_fields:
+        return {"updated": False, "reason": "noop"}
+
+    filt = {"_id": doc["_id"], "user_id": doc.get("user_id"), "provider": "meta"}
+    await db.messages.update_one(filt, {"$set": set_fields})
+    fresh = await db.messages.find_one(filt) or {**doc, **set_fields}
+    if user_id:
+        _publish_best_effort(user_id, "message:updated", serialize(fresh))
+    return {"updated": True, "reason": "applied", "kind": "message", "doc": fresh}
+
+
 async def apply_twilio_status_callback(
     *,
     twilio_sid: str,
