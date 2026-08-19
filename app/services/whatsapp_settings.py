@@ -89,35 +89,31 @@ def _twilio_slice(user: dict) -> dict[str, Any]:
 
 
 def _meta_slice(user: dict) -> dict[str, Any]:
+    from app.services.meta_credentials import tenant_meta_ready
+
     pnid = str(user.get("meta_phone_number_id") or "").strip() or None
     waba = str(user.get("meta_waba_id") or "").strip() or None
     display = str(user.get("meta_display_phone_number") or "").strip() or None
-    env_pnid = (settings.META_PHONE_NUMBER_ID or "").strip() or None
-    env_waba = (settings.META_WABA_ID or "").strip() or None
-    token_present = bool((settings.META_ACCESS_TOKEN or "").strip())
+    conn = str(user.get("meta_connection_status") or "").strip().lower() or None
+    token_valid = bool(pnid and tenant_meta_ready(user))
     routing_ready = bool(pnid)
-    poc_aligned = bool(pnid and env_pnid and pnid == env_pnid)
-    if pnid and not env_pnid:
-        poc_aligned = False
-    sending_ready = bool(routing_ready and token_present and env_pnid and poc_aligned)
+    sending_ready = token_valid
     warnings: list[str] = []
     if not pnid:
         warnings.append("No Meta phone number ID is linked to this account")
-    elif env_pnid and pnid != env_pnid:
-        warnings.append(
-            "This Meta phone number ID does not match the server Phone Number ID (POC)."
-        )
-    if pnid and not token_present:
-        warnings.append("Meta Cloud API token is not configured on the server")
-    if pnid and not env_pnid:
-        warnings.append("META_PHONE_NUMBER_ID is not configured on the server")
+    elif conn in (None, "", "disconnected", "pending", "error"):
+        warnings.append("Meta WhatsApp is not connected for this account")
+    elif not token_valid:
+        warnings.append("Meta credentials are missing or invalid for this account")
+    if pnid and not waba:
+        warnings.append("Meta WABA ID is not set")
 
     if not routing_ready:
         status = "not_configured"
-    elif not poc_aligned:
-        status = "requires_action"
-    elif not sending_ready:
+    elif conn == "error":
         status = "misconfigured"
+    elif not token_valid:
+        status = "requires_action"
     else:
         status = "connected"
 
@@ -125,13 +121,14 @@ def _meta_slice(user: dict) -> dict[str, Any]:
         "status": status,
         "enabled": routing_ready,
         "configured": status == "connected",
+        "connection_status": conn,
         "phone_number_id": pnid,
-        "waba_id": waba or (env_waba if pnid else None),
+        "waba_id": waba,
         "display_phone_number": display,
         "routing_ready": routing_ready,
-        "poc_aligned": poc_aligned,
-        "platform_token_present": token_present,
         "sending_ready": sending_ready,
+        "token_valid": token_valid,
+        "token_expires_at": _iso(user.get("meta_token_expires_at")),
         "webhook_ready": None,
         "last_template_sync_at": _iso(user.get("meta_last_template_sync_at")),
         "warnings": warnings,
@@ -187,12 +184,6 @@ async def apply_whatsapp_settings_patch(db, user: dict, data: dict[str, Any]) ->
 
     if "phone_number_id" in meta:
         pnid = validate_graph_id(meta.get("phone_number_id"), field="phone_number_id")
-        env_pnid = (settings.META_PHONE_NUMBER_ID or "").strip()
-        if pnid and env_pnid and pnid != env_pnid:
-            raise HTTPException(
-                status_code=400,
-                detail="This Meta phone number ID is not authorized for the current server configuration.",
-            )
         update["meta_phone_number_id"] = pnid
         changed.append("meta.phone_number_id")
         if pnid:

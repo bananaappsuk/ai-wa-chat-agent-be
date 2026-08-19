@@ -237,12 +237,25 @@ def test_send_text_builds_correct_request_and_mocks_graph():
             captured["json"] = json
             return _FakeResp()
 
-    with patch.object(meta_whatsapp_service.settings, "META_ACCESS_TOKEN", "test-token"), patch.object(
-        meta_whatsapp_service.settings, "META_PHONE_NUMBER_ID", "123456789"
-    ), patch.object(meta_whatsapp_service.settings, "META_GRAPH_VERSION", "v21.0"), patch(
+    with patch.object(meta_whatsapp_service.settings, "META_GRAPH_VERSION", "v21.0"), patch(
         "app.services.meta_whatsapp_service.httpx.Client", _FakeClient
+    ), patch(
+        "app.services.meta_credentials.get_meta_credentials_for_user",
+        return_value=__import__(
+            "app.services.meta_credentials", fromlist=["MetaTenantCredentials"]
+        ).MetaTenantCredentials(
+            access_token="test-token", phone_number_id="123456789", waba_id="w"
+        ),
     ):
-        result = meta_whatsapp_service.send_text(to="+447700900123", text="Hello from Meta Cloud API")
+        result = meta_whatsapp_service.send_text(
+            to="+447700900123",
+            text="Hello from Meta Cloud API",
+            user={
+                "_id": "u1",
+                "meta_phone_number_id": "123456789",
+                "meta_connection_status": "connected",
+            },
+        )
 
     assert result.provider == "meta"
     assert result.provider_message_id == "wamid.OUTBOUND_1"

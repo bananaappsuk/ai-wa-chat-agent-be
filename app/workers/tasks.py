@@ -286,12 +286,14 @@ def send_outbound_message(
     )
 
     purpose = msg.get("message_purpose") or "conversational"
+    user = db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(str(user_id)) else None
     elig = get_whatsapp_send_eligibility(
         lead=lead,
         purpose=purpose,
         has_template=bool(content_sid) or is_meta_template,
         has_media=bool(media_url),
         provider=msg_provider,
+        user=user,
     )
     if not elig.allowed:
         try:
@@ -332,7 +334,8 @@ def send_outbound_message(
 
         db.messages.update_one({"_id": mid}, {"$set": {"status": "sending", "retry_count": _retry_attempt}})
         if msg_provider == "meta":
-            user = db.users.find_one({"_id": ObjectId(user_id)})
+            if not user:
+                user = db.users.find_one({"_id": ObjectId(user_id)})
             if is_meta_template:
                 from app.services.meta_templates import MetaTemplateError, build_graph_components
 
@@ -503,7 +506,7 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
     # Re-check eligibility at send time — lead state may have changed between
     # webhook enqueue and worker pickup (opt-out, blacklist, etc.).
     elig = get_whatsapp_send_eligibility(
-        lead=lead, purpose="transactional", has_template=False
+        lead=lead, purpose="transactional", has_template=False, user=user
     )
     if not elig.allowed:
         db.leads.update_one(
@@ -614,7 +617,7 @@ def generate_and_send_ai_reply(
         return
 
     elig = get_whatsapp_send_eligibility(
-        lead=lead, purpose="support", has_template=False, provider=send_provider
+        lead=lead, purpose="support", has_template=False, provider=send_provider, user=user
     )
     if not elig.allowed:
         logger.info(
@@ -806,8 +809,9 @@ def generate_and_send_ai_reply(
     lead = db.leads.find_one({"_id": ObjectId(lead_id), "user_id": user_id})
     if not lead:
         return
+    user = db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(str(user_id)) else None
     elig = get_whatsapp_send_eligibility(
-        lead=lead, purpose="support", has_template=False, provider=send_provider
+        lead=lead, purpose="support", has_template=False, provider=send_provider, user=user
     )
     if (
         not elig.allowed
@@ -850,7 +854,7 @@ def generate_and_send_ai_reply(
         return
 
     elig = get_whatsapp_send_eligibility(
-        lead=lead, purpose="support", has_template=False, provider=send_provider
+        lead=lead, purpose="support", has_template=False, provider=send_provider, user=user
     )
     if not elig.allowed:
         _fail_message(db, res.inserted_id, user_id, elig.safe_message, status="canceled", reason_code=elig.reason_code)
@@ -1080,6 +1084,7 @@ def _process_blast_recipient(
     try:
         lead = db.leads.find_one({"user_id": user_id, "phone": norm_phone})
         is_blacklisted = bool(db.blacklist.find_one({"user_id": user_id, "phone": norm_phone}))
+        user = db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(str(user_id)) else None
         elig = get_whatsapp_send_eligibility(
             lead=lead or {"phone": norm_phone, "blacklisted": is_blacklisted},
             phone=norm_phone,
@@ -1088,6 +1093,7 @@ def _process_blast_recipient(
             has_media=bool(media_url) and not content_sid and camp_prov != "meta",
             blacklisted=is_blacklisted,
             provider=camp_prov,
+            user=user,
         )
         if not elig.allowed:
             try:

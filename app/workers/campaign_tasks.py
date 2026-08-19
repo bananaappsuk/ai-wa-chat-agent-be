@@ -470,12 +470,14 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
         if camp_prov not in ("twilio", "meta"):
             raise RuntimeError(f"Unknown WhatsApp provider: {camp_prov}")
 
+        user = db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(str(user_id)) else None
         elig = get_whatsapp_send_eligibility(
             lead=lead or {"phone": phone},
             phone=phone,
             purpose="campaign",
             has_template=has_template,
             provider=camp_prov,
+            user=user,
         )
         if not elig.allowed:
             try:

@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     # Set false only for local debugging; never disable in staging/production.
     META_WEBHOOK_VALIDATE_SIGNATURE: bool = True
     META_HTTP_TIMEOUT_SECONDS: float = 30.0
+    # AES-GCM key for tenant Meta access tokens (32-byte utf-8, or base64 of 16/24/32 bytes).
+    # Distinct from JWT_SECRET. Required in staging/production.
+    META_TOKEN_ENCRYPTION_KEY: str = ""
+    # Dev/test only: allow env META_ACCESS_TOKEN for users with meta_connection_status=legacy_poc.
+    META_ALLOW_LEGACY_POC_TOKEN: bool = False
 
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
@@ -420,11 +425,20 @@ class Settings(BaseSettings):
                     f"when APP_ENV={self.app_env}"
                 )
 
-            if self.whatsapp_provider == "meta" and not self.meta_configured:
+            if self.META_ALLOW_LEGACY_POC_TOKEN:
                 errors.append(
-                    "META_ACCESS_TOKEN and META_PHONE_NUMBER_ID are required "
-                    "when WHATSAPP_PROVIDER=meta"
+                    "META_ALLOW_LEGACY_POC_TOKEN must be false "
+                    f"when APP_ENV={self.app_env}"
                 )
+
+            enc = (self.META_TOKEN_ENCRYPTION_KEY or "").strip()
+            if not enc:
+                errors.append(
+                    "META_TOKEN_ENCRYPTION_KEY is required "
+                    f"when APP_ENV={self.app_env}"
+                )
+            elif enc == (self.JWT_SECRET or "").strip():
+                errors.append("META_TOKEN_ENCRYPTION_KEY must not equal JWT_SECRET")
 
             if self.AI_FEATURES_ENABLED and not (self.OPENAI_API_KEY or "").strip():
                 errors.append("OPENAI_API_KEY is required when AI_FEATURES_ENABLED=true")

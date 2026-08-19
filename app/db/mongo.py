@@ -113,6 +113,7 @@ async def init_indexes() -> None:
         unique=True,
         partialFilterExpression={"meta_phone_number_id": {"$type": "string"}},
     )
+    await db.meta_credentials.create_index("user_id", unique=True)
     await _ensure_leads_phone_index(db)
     await db.leads.create_index([("user_id", 1), ("created_at", -1)])
     await db.leads.create_index([("user_id", 1), ("updated_at", -1)])

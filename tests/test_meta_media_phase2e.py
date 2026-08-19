@@ -22,6 +22,7 @@ from app.services.meta_media import (
     fetch_graph_media_metadata,
 )
 from app.services.meta_whatsapp_service import parse_inbound_messages
+from app.services.meta_credentials import MetaTenantCredentials
 from app.workers import tasks
 from tests.test_meta_inbound_phase2a import (
     MemDB,
@@ -34,6 +35,7 @@ JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 120
 PDF = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
 OGG = b"OggS" + b"\x00" * 80
 TOKEN = "secret-token-NEVER-STORE"
+_CRED = MetaTenantCredentials(access_token=TOKEN, phone_number_id="PN_A", waba_id="WABA")
 GRAPH_TMP = "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=MEDIA99"
 BIN_HOST_URL = "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=MEDIA99"
 
@@ -280,7 +282,7 @@ async def test_metadata_and_binary_use_bearer_auth():
     handler, seen = _handler_factory()
     store = FakeStorage()
     with (
-        patch("app.services.meta_media.settings.META_ACCESS_TOKEN", TOKEN),
+        patch("app.services.meta_credentials.get_meta_credentials_for_user", return_value=_CRED),
         patch("app.services.meta_media.settings.META_GRAPH_VERSION", "v21.0"),
         patch("app.services.meta_media.get_media_storage", return_value=store),
         patch("app.security.ssrf.socket.getaddrinfo", _public_addrinfo),
@@ -289,6 +291,7 @@ async def test_metadata_and_binary_use_bearer_auth():
         fields = await download_and_store_meta_media(
             media_id="MEDIA99",
             user_id="tenant1",
+            user=_user("PN_A"),
             filename_hint="pic.jpg",
             declared_mime="image/jpeg",
             kind="image",
@@ -310,12 +313,14 @@ async def test_webhook_url_cannot_control_download_destination():
 
     store = FakeStorage()
     with (
-        patch("app.services.meta_media.settings.META_ACCESS_TOKEN", TOKEN),
+        patch("app.services.meta_credentials.get_meta_credentials_for_user", return_value=_CRED),
         patch("app.services.meta_media.get_media_storage", return_value=store),
         patch("app.security.ssrf.socket.getaddrinfo", _public_addrinfo),
         _patch_async_client(handler),
     ):
-        await download_and_store_meta_media(media_id="MEDIA99", user_id="t1", kind="image")
+        await download_and_store_meta_media(
+            media_id="MEDIA99", user_id="t1", user=_user("PN_A"), kind="image"
+        )
     hosts = [(urlparse(str(r.url)).hostname or "") for r in seen]
     assert "evil.example" not in hosts
     assert any(h == "graph.facebook.com" for h in hosts)
@@ -328,12 +333,14 @@ async def test_non_allowlisted_host_rejected():
         graph_json={"url": "https://evil.example/x", "mime_type": "image/jpeg", "file_size": 10}
     )
     with (
-        patch("app.services.meta_media.settings.META_ACCESS_TOKEN", TOKEN),
+        patch("app.services.meta_credentials.get_meta_credentials_for_user", return_value=_CRED),
         patch("app.security.ssrf.socket.getaddrinfo", _public_addrinfo),
         _patch_async_client(handler),
         pytest.raises(MetaMediaError),
     ):
-        await download_and_store_meta_media(media_id="MEDIA99", user_id="t1", kind="image")
+        await download_and_store_meta_media(
+            media_id="MEDIA99", user_id="t1", user=_user("PN_A"), kind="image"
+        )
 
 
 @pytest.mark.asyncio
@@ -354,12 +361,14 @@ async def test_redirect_to_non_allowlisted_host_rejected():
         return httpx.Response(200, content=JPEG)
 
     with (
-        patch("app.services.meta_media.settings.META_ACCESS_TOKEN", TOKEN),
+        patch("app.services.meta_credentials.get_meta_credentials_for_user", return_value=_CRED),
         patch("app.security.ssrf.socket.getaddrinfo", _public_addrinfo),
         _patch_async_client(handler),
         pytest.raises(MetaMediaError),
     ):
-        await download_and_store_meta_media(media_id="MEDIA99", user_id="t1", kind="image")
+        await download_and_store_meta_media(
+            media_id="MEDIA99", user_id="t1", user=_user("PN_A"), kind="image"
+        )
 
 
 @pytest.mark.asyncio
@@ -368,12 +377,14 @@ async def test_https_enforced():
         graph_json={"url": "http://lookaside.fbsbx.com/x", "mime_type": "image/jpeg", "file_size": 10}
     )
     with (
-        patch("app.services.meta_media.settings.META_ACCESS_TOKEN", TOKEN),
+        patch("app.services.meta_credentials.get_meta_credentials_for_user", return_value=_CRED),
         patch("app.security.ssrf.socket.getaddrinfo", _public_addrinfo),
         _patch_async_client(handler),
         pytest.raises(MetaMediaError),
     ):
-        await download_and_store_meta_media(media_id="MEDIA99", user_id="t1", kind="image")
+        await download_and_store_meta_media(
+            media_id="MEDIA99", user_id="t1", user=_user("PN_A"), kind="image"
+        )
 
 
 @pytest.mark.asyncio
@@ -382,13 +393,15 @@ async def test_size_limit_enforced():
         graph_json={"url": GRAPH_TMP, "mime_type": "image/jpeg", "file_size": 99_000_000}
     )
     with (
-        patch("app.services.meta_media.settings.META_ACCESS_TOKEN", TOKEN),
+        patch("app.services.meta_credentials.get_meta_credentials_for_user", return_value=_CRED),
         patch("app.services.meta_media.settings.MEDIA_MAX_BYTES", 1024),
         patch("app.security.ssrf.socket.getaddrinfo", _public_addrinfo),
         _patch_async_client(handler),
         pytest.raises(MetaMediaError),
     ):
-        await download_and_store_meta_media(media_id="MEDIA99", user_id="t1", kind="image")
+        await download_and_store_meta_media(
+            media_id="MEDIA99", user_id="t1", user=_user("PN_A"), kind="image"
+        )
 
 
 @pytest.mark.asyncio
@@ -403,7 +416,7 @@ async def test_mime_validation_enforced():
     )
     store = FakeStorage()
     with (
-        patch("app.services.meta_media.settings.META_ACCESS_TOKEN", TOKEN),
+        patch("app.services.meta_credentials.get_meta_credentials_for_user", return_value=_CRED),
         patch("app.services.meta_media.get_media_storage", return_value=store),
         patch("app.security.ssrf.socket.getaddrinfo", _public_addrinfo),
         _patch_async_client(handler),
@@ -412,6 +425,7 @@ async def test_mime_validation_enforced():
         await download_and_store_meta_media(
             media_id="MEDIA99",
             user_id="t1",
+            user=_user("PN_A"),
             declared_mime="image/jpeg",
             kind="image",
         )
@@ -446,7 +460,7 @@ async def test_fetch_graph_metadata_bearer():
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
         with patch("app.services.meta_media.settings.META_ACCESS_TOKEN", TOKEN):
-            data = await fetch_graph_media_metadata("MEDIA99", client=client)
+            data = await fetch_graph_media_metadata("MEDIA99", client=client, access_token=TOKEN)
     assert seen[0].headers.get("Authorization") == f"Bearer {TOKEN}"
     assert data["url"] == GRAPH_TMP
 
@@ -748,10 +762,16 @@ def test_unknown_tenant_does_not_download(client, mem, pushes):
     assert mem.messages.docs == []
 
 
-def test_pnid_mismatch_does_not_download(client, mem, pushes):
+def test_env_pnid_mismatch_still_downloads_when_tenant_matches_webhook(client, mem, pushes):
     items, push = pushes
     mem.users.docs.append(_user("PN_A"))
-    dl = AsyncMock(return_value={})
+    dl = AsyncMock(return_value={
+        "message_type": "image",
+        "media_items": [{"url": "/api/media/files/abc", "content_type": "image/jpeg", "filename": "image.jpg", "index": 0}],
+        "media_url": "/api/media/files/abc",
+        "media_content_type": "image/jpeg",
+        "media_filename": "image.jpg",
+    })
     payload = _media_payload(
         phone_number_id="PN_A",
         wamid="wamid.MM",
@@ -762,10 +782,7 @@ def test_pnid_mismatch_does_not_download(client, mem, pushes):
         "app.services.meta_media.download_and_store_meta_media", dl
     ), patch("app.config.settings.META_PHONE_NUMBER_ID", "PN_ENV"):
         assert _post_meta(client, payload).status_code == 200
-    assert dl.await_count == 0
-    msg = mem.messages.docs[0]
-    assert msg["message"] == "[image]"
-    assert not msg.get("media_url")
+    assert dl.await_count == 1
 
 
 @pytest.mark.asyncio

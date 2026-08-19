@@ -41,10 +41,10 @@ class MetaMediaError(Exception):
     """Inbound media fetch/validation/storage failed (webhook should still persist)."""
 
 
-def _auth_headers() -> dict[str, str]:
-    token = (settings.META_ACCESS_TOKEN or "").strip()
+def _auth_headers(access_token: str) -> dict[str, str]:
+    token = (access_token or "").strip()
     if not token:
-        raise MetaMediaError("META_ACCESS_TOKEN is not configured")
+        raise MetaMediaError("Meta credentials are not configured")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -77,12 +77,17 @@ def _absolute_redirect(current: str, location: str) -> str:
     return urljoin(current, loc)
 
 
-async def fetch_graph_media_metadata(media_id: str, *, client: httpx.AsyncClient) -> dict[str, Any]:
+async def fetch_graph_media_metadata(
+    media_id: str,
+    *,
+    client: httpx.AsyncClient,
+    access_token: str,
+) -> dict[str, Any]:
     mid = (media_id or "").strip()
     if not mid or "/" in mid or "?" in mid or ".." in mid:
         raise MetaMediaError("Invalid media id")
     url = f"https://graph.facebook.com/{_graph_version()}/{mid}"
-    resp = await client.get(url, headers=_auth_headers())
+    resp = await client.get(url, headers=_auth_headers(access_token))
     try:
         data = resp.json()
     except Exception:
@@ -106,6 +111,7 @@ async def _download_bytes(
     *,
     client: httpx.AsyncClient,
     max_bytes: int,
+    access_token: str,
 ) -> bytes:
     try:
         url = assert_safe_meta_media_url(start_url)
@@ -113,7 +119,7 @@ async def _download_bytes(
         raise MetaMediaError(str(exc)) from exc
     hops = 0
     while True:
-        req = client.build_request("GET", url, headers=_auth_headers())
+        req = client.build_request("GET", url, headers=_auth_headers(access_token))
         resp = await client.send(req, follow_redirects=False)
         if resp.status_code in (301, 302, 303, 307, 308):
             hops += 1
@@ -155,17 +161,25 @@ async def download_and_store_meta_media(
     *,
     media_id: str,
     user_id: str,
+    user: Optional[dict] = None,
     filename_hint: str | None = None,
     declared_mime: str | None = None,
     kind: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Return media_fields_from_items dict with internal /api/media/files URL."""
+    from app.services.meta_credentials import MetaCredentialsError, get_meta_credentials_for_user
+
+    try:
+        creds = get_meta_credentials_for_user(user)
+    except MetaCredentialsError as exc:
+        raise MetaMediaError(str(exc)) from exc
+    token = creds.access_token
     own = client is None
     timeout = httpx.Timeout(_timeout())
     http = client or httpx.AsyncClient(timeout=timeout, follow_redirects=False)
     try:
-        meta = await fetch_graph_media_metadata(media_id, client=http)
+        meta = await fetch_graph_media_metadata(media_id, client=http, access_token=token)
         try:
             size_hint = int(meta.get("file_size") or 0)
         except (TypeError, ValueError):
@@ -174,7 +188,7 @@ async def download_and_store_meta_media(
         cap = min(int(settings.MEDIA_MAX_BYTES), max_bytes_for_mime(declared or "application/octet-stream"))
         if size_hint and size_hint > cap:
             raise MetaMediaError("Meta media exceeds size limit")
-        raw = await _download_bytes(meta["url"], client=http, max_bytes=cap)
+        raw = await _download_bytes(meta["url"], client=http, max_bytes=cap, access_token=token)
         name = fallback_filename(kind=kind, mime=declared, filename=filename_hint)
         resolved = resolve_upload_mime(raw, declared, name)
         if not resolved or not is_allowed_mime(resolved):
@@ -205,14 +219,21 @@ async def download_and_store_meta_media(
 
 
 def media_pnid_allows_download(*, user: dict, webhook_pnid: str | None) -> bool:
-    """POC: fail closed when configured user PNID disagrees with env PNID."""
-    env = (settings.META_PHONE_NUMBER_ID or "").strip()
+    """Webhook PNID must match the tenant binding. No env PNID equality for connected tenants."""
     user_pnid = str((user or {}).get("meta_phone_number_id") or "").strip()
     hook = (webhook_pnid or "").strip()
-    if user_pnid and env and user_pnid != env:
+    if not user_pnid or not hook:
         return False
-    if hook and env and hook != env:
+    if user_pnid != hook:
         return False
-    if user_pnid and hook and user_pnid != hook:
-        return False
-    return True
+    status = str((user or {}).get("meta_connection_status") or "").strip().lower()
+    if status == "connected":
+        return True
+    from app.services.meta_credentials import legacy_poc_fallback_allowed
+
+    if status == "legacy_poc" and legacy_poc_fallback_allowed(user):
+        return True
+    if status == "legacy_poc":
+        # Migrated legacy_poc with encrypted creds still owns this PNID.
+        return True
+    return False

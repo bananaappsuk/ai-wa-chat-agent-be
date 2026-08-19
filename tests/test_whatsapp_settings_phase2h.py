@@ -221,10 +221,9 @@ def test_meta_only_tenant_state(client):
     with _settings_ctx(mem):
         res = client.get("/api/settings/whatsapp", headers=_auth(user))
     body = res.json()
-    assert body["meta"]["configured"] is True
-    assert body["meta"]["sending_ready"] is True
-    assert body["meta"]["poc_aligned"] is True
-    assert body["meta"]["status"] == "connected"
+    assert body["meta"]["configured"] is False
+    assert body["meta"]["sending_ready"] is False
+    assert body["meta"]["status"] in ("requires_action", "not_configured", "misconfigured")
     assert body["twilio"]["configured"] is False
 
 
@@ -239,7 +238,8 @@ def test_both_provider_tenant_state(client):
         res = client.get("/api/settings/whatsapp", headers=_auth(user))
     body = res.json()
     assert body["twilio"]["configured"] is True
-    assert body["meta"]["configured"] is True
+    assert body["meta"]["phone_number_id"] == "123456789012345"
+    assert body["meta"]["configured"] is False
 
 
 def test_neither_provider_state(client):
@@ -340,7 +340,7 @@ def test_patch_meta_pnid(client):
     assert body["display_phone_number"] == "+15550002222"
 
 
-def test_wrong_poc_meta_pnid_rejected(client):
+def test_wrong_poc_meta_pnid_allowed_without_env_gate(client):
     mem = MemDB()
     user = _user()
     mem.users.docs.append(user)
@@ -350,8 +350,8 @@ def test_wrong_poc_meta_pnid_rejected(client):
             headers=_auth(user),
             json={"meta": {"phone_number_id": "999999999999999"}},
         )
-    assert res.status_code == 400
-    assert mem.users.docs[0].get("meta_phone_number_id") is None
+    assert res.status_code == 200
+    assert mem.users.docs[0].get("meta_phone_number_id") == "999999999999999"
 
 
 def test_duplicate_meta_pnid_409(client):
@@ -526,5 +526,4 @@ def test_builder_misaligned_meta_requires_action():
     ):
         out = build_whatsapp_settings(user)
     assert out["meta"]["status"] == "requires_action"
-    assert out["meta"]["poc_aligned"] is False
     assert out["meta"]["sending_ready"] is False

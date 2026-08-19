@@ -353,6 +353,7 @@ def test_opted_out_and_blacklist_prevent_meta_send():
         patch("app.services.ai_quota.check_quota", return_value=(True, None)),
         patch("app.services.whatsapp_eligibility.settings.META_ACCESS_TOKEN", "tok"),
         patch("app.services.whatsapp_eligibility.settings.META_PHONE_NUMBER_ID", "PN_A"),
+        patch("app.services.whatsapp_eligibility._meta_sender_ok", return_value=True),
     ):
         tasks.generate_and_send_ai_reply(
             user_id, str(lead_id), provider="meta", trigger_message_id=str(trigger_id)
@@ -372,6 +373,7 @@ def test_opted_out_and_blacklist_prevent_meta_send():
         patch("app.services.ai_quota.check_quota", return_value=(True, None)),
         patch("app.services.whatsapp_eligibility.settings.META_ACCESS_TOKEN", "tok"),
         patch("app.services.whatsapp_eligibility.settings.META_PHONE_NUMBER_ID", "PN_A"),
+        patch("app.services.whatsapp_eligibility._meta_sender_ok", return_value=True),
     ):
         tasks.generate_and_send_ai_reply(
             user_id, str(lead_id), provider="meta", trigger_message_id=str(trigger_id)
@@ -413,6 +415,7 @@ def test_closed_window_prevents_meta_freeform_and_twilio_template():
         patch("app.services.ai_quota.check_quota", return_value=(True, None)),
         patch("app.services.whatsapp_eligibility.settings.META_ACCESS_TOKEN", "tok"),
         patch("app.services.whatsapp_eligibility.settings.META_PHONE_NUMBER_ID", "PN_A"),
+        patch("app.services.whatsapp_eligibility._meta_sender_ok", return_value=True),
     ):
         tasks.generate_and_send_ai_reply(
             user_id, str(lead_id), provider="meta", trigger_message_id=str(trigger_id)
@@ -631,16 +634,18 @@ def test_meta_retry_rejects_media_and_templates():
 
 def test_pnid_mismatch_does_not_send():
     user = {"meta_phone_number_id": "PN_TENANT"}
-    with patch("app.services.meta_whatsapp_service.settings") as st, patch(
-        "app.services.meta_whatsapp_service.httpx.Client"
-    ) as client:
-        st.META_ACCESS_TOKEN = "tok"
-        st.META_PHONE_NUMBER_ID = "PN_ENV"
-        st.META_GRAPH_VERSION = "v21.0"
-        st.META_HTTP_TIMEOUT_SECONDS = 30
-        with pytest.raises(MetaWhatsAppError, match="does not match"):
-            send_whatsapp_text(provider="meta", to="+447700900123", text="hi", user=user)
-        client.assert_not_called()
+    with (
+        patch(
+            "app.services.meta_credentials.get_meta_credentials_for_user",
+            side_effect=__import__(
+                "app.services.meta_credentials", fromlist=["MetaCredentialsError"]
+            ).MetaCredentialsError("Meta credential phone number ID does not match this account"),
+        ),
+        patch("app.services.meta_whatsapp_service.httpx.Client") as client,
+        pytest.raises(MetaWhatsAppError, match="does not match"),
+    ):
+        send_whatsapp_text(provider="meta", to="+447700900123", text="hi", user=user)
+    client.assert_not_called()
 
 
 def test_whatsapp_provider_env_is_not_used_for_legacy_twilio_job(monkeypatch):

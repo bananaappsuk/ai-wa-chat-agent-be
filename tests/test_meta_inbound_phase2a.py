@@ -222,7 +222,12 @@ class MemDB:
 
 
 def _user(pnid: str) -> dict:
-    return {"_id": ObjectId(), "meta_phone_number_id": pnid, "email": f"{pnid}@example.com"}
+    return {
+        "_id": ObjectId(),
+        "meta_phone_number_id": pnid,
+        "meta_connection_status": "connected",
+        "email": f"{pnid}@example.com",
+    }
 
 
 @pytest.fixture

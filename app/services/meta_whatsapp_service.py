@@ -97,35 +97,51 @@ def normalize_meta_phone(raw: Optional[str]) -> Optional[str]:
     return normalize_e164(f"+{digits}")
 
 
-def assert_meta_send_configured() -> None:
-    if not (settings.META_ACCESS_TOKEN or "").strip():
-        raise MetaWhatsAppError("META_ACCESS_TOKEN is not configured")
-    if not (settings.META_PHONE_NUMBER_ID or "").strip():
-        raise MetaWhatsAppError("META_PHONE_NUMBER_ID is not configured")
+def assert_meta_send_configured(user: Optional[dict] = None) -> None:
+    from app.services.meta_credentials import MetaCredentialsError, get_meta_credentials_for_user
+
+    try:
+        get_meta_credentials_for_user(user)
+    except MetaCredentialsError as exc:
+        raise MetaWhatsAppError(str(exc)) from exc
 
 
-def resolve_send_phone_number_id(phone_number_id: Optional[str] = None) -> str:
-    """POC: env token + a single Phone Number ID. Mismatch is a hard error."""
+def resolve_send_phone_number_id(
+    phone_number_id: Optional[str] = None,
+    *,
+    user: Optional[dict] = None,
+) -> str:
+    """Tenant PNID from resolver. Does not use env PNID as a production equality gate."""
+    from app.services.meta_credentials import MetaCredentialsError, get_meta_credentials_for_user
+
+    try:
+        creds = get_meta_credentials_for_user(user)
+    except MetaCredentialsError as exc:
+        raise MetaWhatsAppError(str(exc)) from exc
     explicit = (phone_number_id or "").strip()
-    env_id = (settings.META_PHONE_NUMBER_ID or "").strip()
-    if explicit and env_id and explicit != env_id:
-        raise MetaWhatsAppError(
-            "Tenant meta_phone_number_id does not match META_PHONE_NUMBER_ID"
-        )
-    chosen = explicit or env_id
-    if not chosen:
-        raise MetaWhatsAppError("META_PHONE_NUMBER_ID is not configured")
-    return chosen
+    if explicit and explicit != creds.phone_number_id:
+        raise MetaWhatsAppError("Tenant meta_phone_number_id does not match send credentials")
+    return creds.phone_number_id
 
 
-def send_text(*, to: str, text: str, phone_number_id: Optional[str] = None) -> MetaSendResult:
+def send_text(
+    *,
+    to: str,
+    text: str,
+    user: Optional[dict] = None,
+    phone_number_id: Optional[str] = None,
+) -> MetaSendResult:
     """
     Send a plain-text WhatsApp message via Meta Cloud API.
 
     POST https://graph.facebook.com/{version}/{phone-number-id}/messages
     """
-    if not (settings.META_ACCESS_TOKEN or "").strip():
-        raise MetaWhatsAppError("META_ACCESS_TOKEN is not configured")
+    from app.services.meta_credentials import MetaCredentialsError, get_meta_credentials_for_user
+
+    try:
+        creds = get_meta_credentials_for_user(user)
+    except MetaCredentialsError as exc:
+        raise MetaWhatsAppError(str(exc)) from exc
     body_text = (text or "").strip()
     if not body_text:
         raise MetaWhatsAppError("Message text is required")
@@ -133,7 +149,10 @@ def send_text(*, to: str, text: str, phone_number_id: Optional[str] = None) -> M
         raise MetaWhatsAppError("Message text exceeds WhatsApp limit (4096 characters)")
 
     to_digits = _to_meta_digits(to)
-    phone_number_id = resolve_send_phone_number_id(phone_number_id)
+    explicit = (phone_number_id or "").strip()
+    if explicit and explicit != creds.phone_number_id:
+        raise MetaWhatsAppError("Tenant meta_phone_number_id does not match send credentials")
+    phone_number_id = creds.phone_number_id
     version = (settings.META_GRAPH_VERSION or "v21.0").strip().lstrip("/")
     url = f"https://graph.facebook.com/{version}/{phone_number_id}/messages"
     payload = {
@@ -144,7 +163,7 @@ def send_text(*, to: str, text: str, phone_number_id: Optional[str] = None) -> M
         "text": {"body": body_text},
     }
     headers = {
-        "Authorization": f"Bearer {settings.META_ACCESS_TOKEN.strip()}",
+        "Authorization": f"Bearer {creds.access_token}",
         "Content-Type": "application/json",
     }
     timeout = max(5.0, float(settings.META_HTTP_TIMEOUT_SECONDS or 30.0))
@@ -214,6 +233,7 @@ def send_template(
     name: str,
     language_code: str,
     components: list[dict[str, Any]] | None = None,
+    user: Optional[dict] = None,
     phone_number_id: Optional[str] = None,
 ) -> MetaSendResult:
     """
@@ -221,8 +241,6 @@ def send_template(
 
     POST https://graph.facebook.com/{version}/{phone-number-id}/messages
     """
-    if not (settings.META_ACCESS_TOKEN or "").strip():
-        raise MetaWhatsAppError("META_ACCESS_TOKEN is not configured")
     tmpl_name = (name or "").strip()
     lang = (language_code or "").strip()
     if not tmpl_name:
@@ -231,7 +249,16 @@ def send_template(
         raise MetaWhatsAppError("Template language is required")
 
     to_digits = _to_meta_digits(to)
-    phone_number_id = resolve_send_phone_number_id(phone_number_id)
+    from app.services.meta_credentials import MetaCredentialsError, get_meta_credentials_for_user
+
+    try:
+        creds = get_meta_credentials_for_user(user)
+    except MetaCredentialsError as exc:
+        raise MetaWhatsAppError(str(exc)) from exc
+    explicit = (phone_number_id or "").strip()
+    if explicit and explicit != creds.phone_number_id:
+        raise MetaWhatsAppError("Tenant meta_phone_number_id does not match send credentials")
+    phone_number_id = creds.phone_number_id
     version = (settings.META_GRAPH_VERSION or "v21.0").strip().lstrip("/")
     url = f"https://graph.facebook.com/{version}/{phone_number_id}/messages"
     template_obj: dict[str, Any] = {
@@ -248,7 +275,7 @@ def send_template(
         "template": template_obj,
     }
     headers = {
-        "Authorization": f"Bearer {settings.META_ACCESS_TOKEN.strip()}",
+        "Authorization": f"Bearer {creds.access_token}",
         "Content-Type": "application/json",
     }
     timeout = max(5.0, float(settings.META_HTTP_TIMEOUT_SECONDS or 30.0))

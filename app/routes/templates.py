@@ -311,13 +311,13 @@ async def get_approved_template(user_id: str, template_id: str) -> dict:
 
 
 async def get_sendable_meta_template(user_id: str, template_id: str) -> dict:
-    from app.services.meta_templates import assert_poc_meta_template_tenant, is_meta_template_sendable
+    from app.services.meta_templates import assert_meta_connected_for_templates, is_meta_template_sendable
     from app.services.whatsapp_template_approval import is_whatsapp_template_sendable
 
     user = await get_db().users.find_one({"_id": ObjectId(user_id)})
     if not user:
         raise HTTPException(status_code=404, detail="Template not found")
-    assert_poc_meta_template_tenant(user)
+    assert_meta_connected_for_templates(user)
 
     if not ObjectId.is_valid(template_id):
         raise HTTPException(status_code=404, detail="Template not found")

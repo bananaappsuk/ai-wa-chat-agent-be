@@ -33,11 +33,7 @@ def send_whatsapp_text(
             "status": result.get("status") or "sent",
         }
     if prov == "meta":
-        pnid = None
-        if user:
-            raw = user.get("meta_phone_number_id")
-            pnid = str(raw).strip() if raw else None
-        result = meta_whatsapp_service.send_text(to=to, text=text, phone_number_id=pnid or None)
+        result = meta_whatsapp_service.send_text(to=to, text=text, user=user)
         return {
             "provider": "meta",
             "provider_message_id": result.provider_message_id,
@@ -58,16 +54,12 @@ def send_whatsapp_template(
     """Send a template on Meta Cloud API. Twilio templates stay on the existing worker path."""
     prov = (provider or "").strip().lower()
     if prov == "meta":
-        pnid = None
-        if user:
-            raw = user.get("meta_phone_number_id")
-            pnid = str(raw).strip() if raw else None
         result = meta_whatsapp_service.send_template(
             to=to,
             name=name,
             language_code=language_code,
             components=components or [],
-            phone_number_id=pnid or None,
+            user=user,
         )
         return {
             "provider": "meta",

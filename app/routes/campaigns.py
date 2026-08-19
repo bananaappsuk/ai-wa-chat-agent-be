@@ -661,7 +661,7 @@ async def start_campaign(
         )
 
     from app.services.campaign_provider import stored_provider
-    from app.services.meta_templates import assert_poc_meta_template_tenant
+    from app.services.meta_templates import assert_meta_connected_for_templates
 
     camp_provider = stored_provider(doc)
     if camp_provider == "meta":
@@ -680,7 +680,7 @@ async def start_campaign(
                 status_code=400,
                 detail="Media sending is not supported for Meta WhatsApp campaigns or blasts.",
             )
-        assert_poc_meta_template_tenant(user)
+        assert_meta_connected_for_templates(user)
 
     # Block launch when nobody can be sent (avoids "Completed" with 0 sent).
     pending = await get_db().campaign_recipients.count_documents(
@@ -734,6 +734,7 @@ async def start_campaign(
                 purpose="campaign",
                 has_template=has_template or camp_provider == "meta",
                 provider=camp_provider,
+                user=user,
             )
             if elig.allowed:
                 eligible += 1

@@ -56,8 +56,6 @@ async def apply_meta_status_update(
     """Apply a Meta Cloud API delivery status to one outbound Meta message
     and matching campaign/blast recipients (by provider_message_id).
     """
-    from app.config import settings
-
     wamid = (provider_message_id or "").strip()
     if not wamid:
         return {"updated": False, "reason": "empty_id"}
@@ -94,18 +92,10 @@ async def apply_meta_status_update(
     if user_id and ObjectId.is_valid(user_id):
         user = await db.users.find_one({"_id": ObjectId(user_id)})
     user_pnid = _pnid((user or {}).get("meta_phone_number_id"))
-    env_pnid = _pnid(getattr(settings, "META_PHONE_NUMBER_ID", None))
 
     if webhook_pnid and user_pnid and webhook_pnid != user_pnid:
         logger.warning(
             "Meta status PNID mismatch user_id=%s wamid_suffix=...%s",
-            user_id,
-            wamid[-8:] if len(wamid) > 8 else "?",
-        )
-        return {"updated": False, "reason": "pnid_mismatch"}
-    if webhook_pnid and user_pnid and env_pnid and webhook_pnid != env_pnid:
-        logger.warning(
-            "Meta status env PNID mismatch user_id=%s wamid_suffix=...%s",
             user_id,
             wamid[-8:] if len(wamid) > 8 else "?",
         )

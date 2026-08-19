@@ -5,6 +5,7 @@ pymongo==4.9.2
 pydantic==2.9.2
 pydantic-settings==2.6.1
 python-jose[cryptography]==3.3.0
+cryptography==49.0.0
 passlib==1.7.4
 bcrypt==4.2.1
 python-multipart==0.0.12

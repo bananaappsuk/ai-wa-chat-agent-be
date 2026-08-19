@@ -32,7 +32,7 @@ async def meta_test_send(
     user_id = str(user.get("_id") or "")
     logger.info("meta_test_send requested user_id=%s to=%s text_len=%s", user_id, body.to, len(body.message))
     try:
-        result = meta_whatsapp_service.send_text(to=body.to, text=body.message)
+        result = meta_whatsapp_service.send_text(to=body.to, text=body.message, user=user)
     except MetaWhatsAppError as exc:
         status = 502
         if exc.status_code and 400 <= int(exc.status_code) < 500:

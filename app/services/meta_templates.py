@@ -30,21 +30,25 @@ class MetaTemplateError(ValueError):
     """Invalid Meta template selection or variable mapping (HTTP 400)."""
 
 
-def assert_poc_meta_template_tenant(user: dict) -> None:
-    token = (settings.META_ACCESS_TOKEN or "").strip()
-    waba = (settings.META_WABA_ID or "").strip()
-    env_pnid = (settings.META_PHONE_NUMBER_ID or "").strip()
-    user_pnid = str((user or {}).get("meta_phone_number_id") or "").strip()
-    if not token or not waba or not env_pnid:
+def assert_meta_connected_for_templates(user: dict) -> None:
+    from app.services.meta_credentials import MetaCredentialsError, get_meta_credentials_for_user
+
+    try:
+        creds = get_meta_credentials_for_user(user)
+    except MetaCredentialsError as exc:
+        msg = str(exc)
+        code = 403 if "does not match" in msg.lower() or "not connected" in msg.lower() else 400
+        raise HTTPException(status_code=code, detail=msg) from exc
+    if not (creds.waba_id or "").strip():
         raise HTTPException(
             status_code=400,
-            detail="Meta WhatsApp templates are not configured (WABA, token, or phone number id missing).",
+            detail="Meta WhatsApp templates are not configured (WABA missing).",
         )
-    if not user_pnid or user_pnid != env_pnid:
-        raise HTTPException(
-            status_code=403,
-            detail="This account is not authorized to sync or send Meta WhatsApp templates.",
-        )
+
+
+def assert_poc_meta_template_tenant(user: dict) -> None:
+    """Compatibility alias — tenant credential check (no env PNID gate)."""
+    assert_meta_connected_for_templates(user)
 
 
 def _timeout() -> float:
@@ -55,10 +59,10 @@ def _graph_version() -> str:
     return (settings.META_GRAPH_VERSION or "v21.0").strip().lstrip("/")
 
 
-def _auth_headers() -> dict[str, str]:
-    token = (settings.META_ACCESS_TOKEN or "").strip()
+def _auth_headers(access_token: str) -> dict[str, str]:
+    token = (access_token or "").strip()
     if not token:
-        raise MetaTemplateError("META_ACCESS_TOKEN is not configured")
+        raise MetaTemplateError("Meta credentials are not configured")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -305,10 +309,16 @@ def _graph_item_to_row(item: dict[str, Any], *, user_id: str) -> dict[str, Any] 
     }
 
 
-async def fetch_graph_message_templates() -> list[dict[str, Any]]:
-    waba = (settings.META_WABA_ID or "").strip()
+async def fetch_graph_message_templates(user: dict) -> list[dict[str, Any]]:
+    from app.services.meta_credentials import MetaCredentialsError, get_meta_credentials_for_user
+
+    try:
+        creds = get_meta_credentials_for_user(user)
+    except MetaCredentialsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    waba = (creds.waba_id or "").strip()
     if not waba or "/" in waba or ".." in waba:
-        raise HTTPException(status_code=400, detail="META_WABA_ID is not configured")
+        raise HTTPException(status_code=400, detail="Meta WABA ID is not configured")
     version = _graph_version()
     url = (
         f"https://graph.facebook.com/{version}/{waba}/message_templates"
@@ -318,7 +328,7 @@ async def fetch_graph_message_templates() -> list[dict[str, Any]]:
     timeout = httpx.Timeout(_timeout())
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         for _ in range(_MAX_PAGES):
-            resp = await client.get(_safe_graph_url(url), headers=_auth_headers())
+            resp = await client.get(_safe_graph_url(url), headers=_auth_headers(creds.access_token))
             try:
                 data = resp.json()
             except Exception:
@@ -342,10 +352,10 @@ async def fetch_graph_message_templates() -> list[dict[str, Any]]:
 
 
 async def sync_meta_templates_for_user(db, *, user: dict) -> dict[str, Any]:
-    assert_poc_meta_template_tenant(user)
+    assert_meta_connected_for_templates(user)
     user_id = str(user["_id"])
     try:
-        graph_rows = await fetch_graph_message_templates()
+        graph_rows = await fetch_graph_message_templates(user)
     except HTTPException:
         raise
     except httpx.TimeoutException as exc:

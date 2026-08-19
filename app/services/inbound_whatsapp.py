@@ -153,7 +153,18 @@ async def _resolve_tenant(db, inbound: InboundMessage) -> dict | None:
                 user = await db.users.find_one({"twilio_whatsapp_to": norm})
         return user
     if provider == "meta":
-        return await db.users.find_one({"meta_phone_number_id": ident})
+        user = await db.users.find_one({"meta_phone_number_id": ident})
+        if not user:
+            return None
+        status = str(user.get("meta_connection_status") or "").strip().lower()
+        if status == "connected":
+            return user
+        if status == "legacy_poc":
+            from app.services.meta_credentials import legacy_poc_fallback_allowed, tenant_meta_ready
+
+            if legacy_poc_fallback_allowed(user) or tenant_meta_ready(user):
+                return user
+        return None
     return None
 
 
@@ -290,6 +301,7 @@ async def process_inbound_message(
                 media_meta = await download_and_store_meta_media(
                     media_id=inbound.media_id or "",
                     user_id=user_id,
+                    user=user,
                     filename_hint=inbound.media_filename,
                     declared_mime=inbound.media_mime_type,
                     kind=inbound.media_kind or inbound.message_type,

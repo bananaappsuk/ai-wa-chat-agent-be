@@ -52,6 +52,15 @@ def _meta_settings(st):
     return st
 
 
+def _meta_connected():
+    from app.services.meta_credentials import MetaTenantCredentials
+
+    return patch(
+        "app.services.meta_credentials.get_meta_credentials_for_user",
+        return_value=MetaTenantCredentials(access_token=TOKEN, phone_number_id=PNID, waba_id=WABA),
+    )
+
+
 def _create_db(user_id: ObjectId, tmpl=None, camp_oid=None):
     camp_oid = camp_oid or ObjectId()
     db = MagicMock()
@@ -85,6 +94,7 @@ async def test_meta_campaign_requires_sendable_and_stores_provider():
         patch("app.services.campaign_provider.get_db", return_value=db),
         patch("app.security.rate_limit.rate_limit_campaign"),
         patch("app.services.meta_templates.settings") as st,
+        _meta_connected(),
     ):
         _meta_settings(st)
         result = await camp_routes.create_campaign(
@@ -220,9 +230,7 @@ async def test_cross_provider_twilio_helper_rejects_meta_id():
 
 
 def test_meta_campaign_consent_required():
-    with patch("app.config.settings.META_ACCESS_TOKEN", TOKEN), patch(
-        "app.config.settings.META_PHONE_NUMBER_ID", PNID
-    ):
+    with patch("app.services.whatsapp_eligibility._meta_sender_ok", return_value=True):
         elig = get_whatsapp_send_eligibility(
             lead={"phone": "+447700900000", "whatsapp_consent_status": "unknown", "blacklisted": False},
             phone="+447700900000",
@@ -235,9 +243,7 @@ def test_meta_campaign_consent_required():
 
 
 def test_blacklist_blocked():
-    with patch("app.config.settings.META_ACCESS_TOKEN", TOKEN), patch(
-        "app.config.settings.META_PHONE_NUMBER_ID", PNID
-    ):
+    with patch("app.services.whatsapp_eligibility._meta_sender_ok", return_value=True):
         elig = get_whatsapp_send_eligibility(
             lead={"phone": "+447700900000", "whatsapp_consent_status": "opted_in", "blacklisted": True},
             phone="+447700900000",
@@ -268,6 +274,7 @@ def _meta_worker_patches(db, send_side=None, send_return=None):
         patch.object(ct.twilio_service, "send_whatsapp"),
         patch("app.config.settings.META_ACCESS_TOKEN", TOKEN),
         patch("app.config.settings.META_PHONE_NUMBER_ID", PNID),
+        patch("app.services.whatsapp_eligibility._meta_sender_ok", return_value=True),
     )
 
 
@@ -308,7 +315,7 @@ def test_campaign_worker_meta_graph_not_twilio():
     db.messages.insert_one = MagicMock(return_value=SimpleNamespace(inserted_id=ObjectId()))
     db.campaign_recipients.aggregate = MagicMock(return_value=[])
     patches = _meta_worker_patches(db)
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7] as send_tpl, patches[8] as twilio, patches[9], patches[10]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7] as send_tpl, patches[8] as twilio, patches[9], patches[10], patches[11]:
         ct.send_campaign_recipient(user_id, campaign_id, str(recipient_id))
     twilio.assert_not_called()
     send_tpl.assert_called_once()
@@ -393,7 +400,7 @@ def test_campaign_worker_meta_429_retries_meta_only():
     db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID})
     q = MagicMock()
     patches = list(_meta_worker_patches(db, send_side=MetaWhatsAppError("rate", status_code=429)))
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8] as twilio, patches[9], patches[10], patch.object(ct, "_queue", return_value=q):
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8] as twilio, patches[9], patches[10], patches[11], patch.object(ct, "_queue", return_value=q):
         ct.send_campaign_recipient(user_id, campaign_id, str(recipient_id))
     twilio.assert_not_called()
     rec_set = db.campaign_recipients.find_one_and_update.call_args_list[-1][0][1]["$set"]
@@ -434,7 +441,7 @@ def test_campaign_worker_meta_hard_4xx_fails():
     db.templates.find_one = MagicMock(return_value=tmpl)
     db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID})
     patches = list(_meta_worker_patches(db, send_side=MetaWhatsAppError("bad template", status_code=400)))
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8] as twilio, patches[9], patches[10]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8] as twilio, patches[9], patches[10], patches[11]:
         ct.send_campaign_recipient(user_id, campaign_id, str(recipient_id))
     twilio.assert_not_called()
     failed = db.campaign_recipients.find_one_and_update.call_args_list[-1][0][1]["$set"]
@@ -479,10 +486,18 @@ async def test_tenant_isolation_and_pnid_mismatch():
     mem = MemDB()
     mem.templates = MemColl()
     mem.templates.docs.append(tmpl)
-    mem.users.docs.append({"_id": ObjectId(b), "meta_phone_number_id": PNID})
+    mem.users.docs.append(
+        {
+            "_id": ObjectId(b),
+            "meta_phone_number_id": PNID,
+            "meta_waba_id": WABA,
+            "meta_connection_status": "connected",
+        }
+    )
     with (
         patch("app.routes.templates.get_db", return_value=mem),
         patch("app.services.meta_templates.settings") as st,
+        _meta_connected(),
         pytest.raises(HTTPException) as exc,
     ):
         _meta_settings(st)
@@ -564,6 +579,7 @@ async def test_meta_blast_stores_provider():
         patch("app.services.meta_templates.settings") as st,
         patch("app.config.settings.META_ACCESS_TOKEN", TOKEN),
         patch("app.config.settings.META_PHONE_NUMBER_ID", PNID),
+        _meta_connected(),
     ):
         _meta_settings(st)
         await camp_routes.create_blast(
@@ -614,6 +630,7 @@ def test_blast_worker_meta_not_twilio_and_wamid():
         patch.object(tasks, "send_whatsapp_text") as send_text,
         patch("app.config.settings.META_ACCESS_TOKEN", TOKEN),
         patch("app.config.settings.META_PHONE_NUMBER_ID", PNID),
+        patch("app.services.whatsapp_eligibility._meta_sender_ok", return_value=True),
     ):
         tasks._process_blast_recipient(
             db,

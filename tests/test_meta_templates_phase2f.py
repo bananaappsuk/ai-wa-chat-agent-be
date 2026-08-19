@@ -119,32 +119,37 @@ def test_media_header_not_send_supported():
 
 
 def test_poc_tenant_guards():
-    user = {"_id": ObjectId(), "meta_phone_number_id": "PN_OTHER"}
+    from app.services.meta_credentials import MetaCredentialsError, MetaTenantCredentials
+
+    user = {"_id": ObjectId(), "meta_phone_number_id": "PN_OTHER", "meta_connection_status": "connected"}
     with (
-        patch.object(mt.settings, "META_ACCESS_TOKEN", TOKEN),
-        patch.object(mt.settings, "META_WABA_ID", WABA),
-        patch.object(mt.settings, "META_PHONE_NUMBER_ID", PNID),
+        patch(
+            "app.services.meta_credentials.get_meta_credentials_for_user",
+            side_effect=MetaCredentialsError("Meta credential phone number ID does not match this account"),
+        ),
         pytest.raises(HTTPException) as exc,
     ):
         mt.assert_poc_meta_template_tenant(user)
     assert exc.value.status_code == 403
 
     with (
-        patch.object(mt.settings, "META_ACCESS_TOKEN", ""),
-        patch.object(mt.settings, "META_WABA_ID", WABA),
-        patch.object(mt.settings, "META_PHONE_NUMBER_ID", PNID),
+        patch(
+            "app.services.meta_credentials.get_meta_credentials_for_user",
+            side_effect=MetaCredentialsError("Meta credentials are not configured for this account"),
+        ),
         pytest.raises(HTTPException) as exc2,
     ):
-        mt.assert_poc_meta_template_tenant({"_id": ObjectId(), "meta_phone_number_id": PNID})
+        mt.assert_poc_meta_template_tenant({"_id": ObjectId(), "meta_phone_number_id": PNID, "meta_connection_status": "connected"})
     assert exc2.value.status_code == 400
 
     with (
-        patch.object(mt.settings, "META_ACCESS_TOKEN", TOKEN),
-        patch.object(mt.settings, "META_WABA_ID", ""),
-        patch.object(mt.settings, "META_PHONE_NUMBER_ID", PNID),
+        patch(
+            "app.services.meta_credentials.get_meta_credentials_for_user",
+            return_value=MetaTenantCredentials(access_token=TOKEN, phone_number_id=PNID, waba_id=""),
+        ),
         pytest.raises(HTTPException) as exc3,
     ):
-        mt.assert_poc_meta_template_tenant({"_id": ObjectId(), "meta_phone_number_id": PNID})
+        mt.assert_poc_meta_template_tenant({"_id": ObjectId(), "meta_phone_number_id": PNID, "meta_connection_status": "connected"})
     assert exc3.value.status_code == 400
 
 
@@ -196,12 +201,20 @@ async def test_sync_uses_bearer_and_pagination():
             super().__init__(*a, **k)
 
     mem = _mem()
-    user = {"_id": ObjectId(), "meta_phone_number_id": PNID}
+    user = {
+        "_id": ObjectId(),
+        "meta_phone_number_id": PNID,
+        "meta_waba_id": WABA,
+        "meta_connection_status": "connected",
+    }
     with (
-        patch.object(mt.settings, "META_ACCESS_TOKEN", TOKEN),
-        patch.object(mt.settings, "META_WABA_ID", WABA),
-        patch.object(mt.settings, "META_PHONE_NUMBER_ID", PNID),
         patch.object(mt.settings, "META_GRAPH_VERSION", "v21.0"),
+        patch(
+            "app.services.meta_credentials.get_meta_credentials_for_user",
+            return_value=__import__(
+                "app.services.meta_credentials", fromlist=["MetaTenantCredentials"]
+            ).MetaTenantCredentials(access_token=TOKEN, phone_number_id=PNID, waba_id=WABA),
+        ),
         patch("app.services.meta_templates.httpx.AsyncClient", _C),
     ):
         result = await mt.sync_meta_templates_for_user(mem, user=user)
@@ -224,11 +237,14 @@ async def test_sync_uses_bearer_and_pagination():
 @pytest.mark.asyncio
 async def test_wrong_pnid_cannot_sync():
     mem = _mem()
-    user = {"_id": ObjectId(), "meta_phone_number_id": "NOPE"}
+    user = {"_id": ObjectId(), "meta_phone_number_id": "NOPE", "meta_connection_status": "connected"}
     with (
-        patch.object(mt.settings, "META_ACCESS_TOKEN", TOKEN),
-        patch.object(mt.settings, "META_WABA_ID", WABA),
-        patch.object(mt.settings, "META_PHONE_NUMBER_ID", PNID),
+        patch(
+            "app.services.meta_credentials.get_meta_credentials_for_user",
+            side_effect=__import__(
+                "app.services.meta_credentials", fromlist=["MetaCredentialsError"]
+            ).MetaCredentialsError("Meta credential phone number ID does not match this account"),
+        ),
         pytest.raises(HTTPException) as exc,
     ):
         await mt.sync_meta_templates_for_user(mem, user=user)
@@ -265,6 +281,12 @@ def test_send_template_graph_payload_and_no_token_in_result():
     with (
         patch("app.services.meta_whatsapp_service.settings") as st,
         patch("app.services.meta_whatsapp_service.httpx.Client", FakeClient),
+        patch(
+            "app.services.meta_credentials.get_meta_credentials_for_user",
+            return_value=__import__(
+                "app.services.meta_credentials", fromlist=["MetaTenantCredentials"]
+            ).MetaTenantCredentials(access_token=TOKEN, phone_number_id=PNID, waba_id=WABA),
+        ),
     ):
         st.META_ACCESS_TOKEN = TOKEN
         st.META_PHONE_NUMBER_ID = PNID
@@ -275,6 +297,7 @@ def test_send_template_graph_payload_and_no_token_in_result():
             name="order_update",
             language_code="en_US",
             components=[{"type": "body", "parameters": [{"type": "text", "text": "x"}]}],
+            user={"_id": "u1", "meta_phone_number_id": PNID, "meta_connection_status": "connected"},
         )
     assert captured["json"]["type"] == "template"
     assert captured["json"]["template"]["name"] == "order_update"
@@ -604,12 +627,15 @@ async def test_tenant_isolation_get_sendable():
     tmpl = _approved_meta_tmpl(a)
     mem = _mem()
     mem.templates.docs.append(tmpl)
-    mem.users.docs.append({"_id": ObjectId(b), "meta_phone_number_id": PNID})
+    mem.users.docs.append({"_id": ObjectId(b), "meta_phone_number_id": PNID, "meta_waba_id": WABA, "meta_connection_status": "connected"})
     with (
         patch.object(templates_route, "get_db", return_value=mem),
-        patch.object(mt.settings, "META_ACCESS_TOKEN", TOKEN),
-        patch.object(mt.settings, "META_WABA_ID", WABA),
-        patch.object(mt.settings, "META_PHONE_NUMBER_ID", PNID),
+        patch(
+            "app.services.meta_credentials.get_meta_credentials_for_user",
+            return_value=__import__(
+                "app.services.meta_credentials", fromlist=["MetaTenantCredentials"]
+            ).MetaTenantCredentials(access_token=TOKEN, phone_number_id=PNID, waba_id=WABA),
+        ),
         pytest.raises(HTTPException) as exc,
     ):
         await templates_route.get_sendable_meta_template(b, str(tmpl["_id"]))

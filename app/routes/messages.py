@@ -275,6 +275,7 @@ async def send_message(
         has_template=has_template,
         has_media=bool(media_url),
         provider=provider,
+        user=user,
     )
     if not elig.allowed:
         inc_policy_blocked(elig.reason_code)
@@ -404,5 +405,6 @@ async def check_eligibility(payload: dict, user: dict = Depends(current_user)) -
         has_template=has_template,
         has_media=has_media,
         provider=preview_provider or "twilio",
+        user=user,
     )
     return result.to_dict()
