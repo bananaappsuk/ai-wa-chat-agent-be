@@ -9,7 +9,7 @@ from redis import Redis
 
 from app.config import settings
 from app.services import twilio_service, openai_service
-from app.services.whatsapp_outbound import send_whatsapp_text
+from app.services.whatsapp_outbound import send_whatsapp_text, send_whatsapp_template
 from app.services.whatsapp_window import (
     WINDOW_CLOSED_ERROR,
     is_whatsapp_window_open,
@@ -260,25 +260,36 @@ def send_outbound_message(
         )
         return
     if msg_provider == "meta" and (
-        content_sid
-        or media_url
-        or msg.get("content_sid")
+        media_url
         or msg.get("media_url")
     ):
         _fail_message(
             db,
             mid,
             user_id,
-            "Meta media and templates are not supported yet",
+            "Meta media is not supported yet",
             reason_code="non_retryable",
         )
         return
+    if msg_provider == "meta" and (content_sid or msg.get("content_sid")):
+        _fail_message(
+            db,
+            mid,
+            user_id,
+            "Twilio Content templates cannot be sent on Meta WhatsApp conversations",
+            reason_code="non_retryable",
+        )
+        return
+
+    is_meta_template = msg_provider == "meta" and (
+        (msg.get("message_type") or "") == "template" or bool(msg.get("meta_template_name"))
+    )
 
     purpose = msg.get("message_purpose") or "conversational"
     elig = get_whatsapp_send_eligibility(
         lead=lead,
         purpose=purpose,
-        has_template=bool(content_sid),
+        has_template=bool(content_sid) or is_meta_template,
         has_media=bool(media_url),
         provider=msg_provider,
     )
@@ -313,21 +324,50 @@ def send_outbound_message(
     try:
         resolved_media = None if content_sid else _resolve_media_url(media_url)
         send_body = body
-        if not content_sid and not send_body and resolved_media:
+        if not content_sid and not is_meta_template and not send_body and resolved_media:
             send_body = None
-        if not content_sid and not send_body and not resolved_media:
+        if not content_sid and not is_meta_template and not send_body and not resolved_media:
             _fail_message(db, mid, user_id, "empty message")
             return
 
         db.messages.update_one({"_id": mid}, {"$set": {"status": "sending", "retry_count": _retry_attempt}})
         if msg_provider == "meta":
             user = db.users.find_one({"_id": ObjectId(user_id)})
-            result = send_whatsapp_text(
-                provider="meta",
-                to=lead["phone"],
-                text=send_body or "",
-                user=user,
-            )
+            if is_meta_template:
+                from app.services.meta_templates import MetaTemplateError, build_graph_components
+
+                tid = msg.get("template_id")
+                tmpl = None
+                if tid and ObjectId.is_valid(str(tid)):
+                    tmpl = db.templates.find_one(
+                        {"_id": ObjectId(str(tid)), "user_id": user_id, "provider": "meta"}
+                    )
+                if not tmpl:
+                    _fail_message(db, mid, user_id, "Meta template not found", reason_code="non_retryable")
+                    return
+                try:
+                    components = build_graph_components(
+                        template=tmpl,
+                        content_variables=content_variables or msg.get("content_variables"),
+                    )
+                except MetaTemplateError as exc:
+                    _fail_message(db, mid, user_id, str(exc), reason_code="non_retryable")
+                    return
+                result = send_whatsapp_template(
+                    provider="meta",
+                    to=lead["phone"],
+                    name=(tmpl.get("meta_template_name") or msg.get("meta_template_name") or ""),
+                    language_code=(tmpl.get("meta_language_code") or msg.get("meta_language_code") or ""),
+                    components=components,
+                    user=user,
+                )
+            else:
+                result = send_whatsapp_text(
+                    provider="meta",
+                    to=lead["phone"],
+                    text=send_body or "",
+                    user=user,
+                )
             db.messages.update_one(
                 {"_id": mid},
                 {

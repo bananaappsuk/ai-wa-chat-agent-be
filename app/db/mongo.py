@@ -175,6 +175,15 @@ async def init_indexes() -> None:
     await db.templates.create_index([("user_id", 1), ("updated_at", -1)])
     await db.templates.create_index([("user_id", 1), ("name", 1)])
     await db.templates.create_index([("user_id", 1), ("content_sid", 1)])
+    await db.templates.create_index(
+        [("user_id", 1), ("provider", 1), ("meta_template_name", 1), ("meta_language_code", 1)],
+        unique=True,
+        partialFilterExpression={
+            "provider": "meta",
+            "meta_template_name": {"$type": "string"},
+            "meta_language_code": {"$type": "string"},
+        },
+    )
     await db.consent_events.create_index([("user_id", 1), ("lead_id", 1), ("created_at", -1)])
     await db.messages.create_index(
         [("user_id", 1), ("idempotency_key", 1)],

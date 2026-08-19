@@ -90,6 +90,13 @@ async def _send(lead, user, payload, inbound, *, expect_ok=True):
                 }
             ),
         ),
+        patch.object(
+            messages_route,
+            "get_sendable_meta_template",
+            new=AsyncMock(
+                side_effect=HTTPException(status_code=404, detail="Template not found")
+            ),
+        ),
     ):
         if expect_ok:
             result = await messages_route.send_message(payload, user=user)
@@ -168,7 +175,7 @@ async def test_meta_closed_window_400_no_queue_no_twilio_template():
     )
     assert err.status_code == 400
     detail = str(err.detail)
-    assert "Meta template" in detail
+    assert "approved Meta WhatsApp template" in detail
     assert "Content SID" not in detail
     enq.assert_not_called()
     insert.assert_not_called()
@@ -213,8 +220,8 @@ async def test_meta_template_and_content_sid_rejected():
         {"direction": "inbound", "provider": "meta"},
         expect_ok=False,
     )
-    assert err.status_code == 400
-    assert "Template" in str(err.detail)
+    assert err.status_code == 404
+    assert "Template not found" in str(err.detail)
     enq.assert_not_called()
     insert.assert_not_called()
 
@@ -230,7 +237,7 @@ async def test_meta_template_and_content_sid_rejected():
         expect_ok=False,
     )
     assert err2.status_code == 400
-    assert "Template" in str(err2.detail)
+    assert "Twilio Content" in str(err2.detail)
     enq2.assert_not_called()
     insert2.assert_not_called()
 

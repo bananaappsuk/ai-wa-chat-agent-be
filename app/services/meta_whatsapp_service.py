@@ -208,6 +208,110 @@ def send_text(*, to: str, text: str, phone_number_id: Optional[str] = None) -> M
     )
 
 
+def send_template(
+    *,
+    to: str,
+    name: str,
+    language_code: str,
+    components: list[dict[str, Any]] | None = None,
+    phone_number_id: Optional[str] = None,
+) -> MetaSendResult:
+    """
+    Send a WhatsApp template via Meta Cloud API.
+
+    POST https://graph.facebook.com/{version}/{phone-number-id}/messages
+    """
+    if not (settings.META_ACCESS_TOKEN or "").strip():
+        raise MetaWhatsAppError("META_ACCESS_TOKEN is not configured")
+    tmpl_name = (name or "").strip()
+    lang = (language_code or "").strip()
+    if not tmpl_name:
+        raise MetaWhatsAppError("Template name is required")
+    if not lang:
+        raise MetaWhatsAppError("Template language is required")
+
+    to_digits = _to_meta_digits(to)
+    phone_number_id = resolve_send_phone_number_id(phone_number_id)
+    version = (settings.META_GRAPH_VERSION or "v21.0").strip().lstrip("/")
+    url = f"https://graph.facebook.com/{version}/{phone_number_id}/messages"
+    template_obj: dict[str, Any] = {
+        "name": tmpl_name,
+        "language": {"code": lang},
+    }
+    if components:
+        template_obj["components"] = components
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to_digits,
+        "type": "template",
+        "template": template_obj,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.META_ACCESS_TOKEN.strip()}",
+        "Content-Type": "application/json",
+    }
+    timeout = max(5.0, float(settings.META_HTTP_TIMEOUT_SECONDS or 30.0))
+
+    logger.info(
+        "meta_send_template phone_number_id=%s to=%s name=%s language=%s graph_version=%s",
+        phone_number_id,
+        to_digits,
+        tmpl_name,
+        lang,
+        version,
+    )
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, json=payload, headers=headers)
+    except httpx.TimeoutException as exc:
+        logger.warning("meta_send_template timeout to=%s", to_digits)
+        raise MetaWhatsAppError("Meta Graph API request timed out") from exc
+    except httpx.HTTPError as exc:
+        logger.warning("meta_send_template http_error type=%s", type(exc).__name__)
+        raise MetaWhatsAppError(f"Meta Graph API request failed: {type(exc).__name__}") from exc
+
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": (resp.text or "")[:500]}
+
+    if resp.is_error:
+        err = data.get("error") if isinstance(data, dict) else None
+        msg = "Meta Graph API template send failed"
+        if isinstance(err, dict):
+            msg = str(err.get("message") or msg)
+        logger.warning(
+            "meta_send_template failed status=%s to=%s error=%s",
+            resp.status_code,
+            to_digits,
+            (msg or "")[:200],
+        )
+        raise MetaWhatsAppError(msg, status_code=resp.status_code, details=err or data)
+
+    message_id = None
+    if isinstance(data, dict):
+        messages = data.get("messages")
+        if isinstance(messages, list) and messages:
+            first = messages[0]
+            if isinstance(first, dict):
+                message_id = first.get("id")
+
+    logger.info(
+        "meta_send_template ok to=%s provider_message_id=%s",
+        to_digits,
+        message_id,
+    )
+    return MetaSendResult(
+        provider="meta",
+        provider_message_id=str(message_id) if message_id else None,
+        phone_number_id=phone_number_id,
+        to=to_digits,
+        raw=data if isinstance(data, dict) else {"response": data},
+    )
+
+
 def verify_webhook_signature(*, raw_body: bytes, signature_header: str | None) -> bool:
     """
     Validate Meta X-Hub-Signature-256 (sha256=<hex>) against META_APP_SECRET and raw body.

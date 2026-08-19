@@ -15,7 +15,7 @@ from app.services.media import media_fields_from_items
 from app.services.ws_manager import ws_manager
 from app.workers.queue import enqueue
 from app.workers import tasks
-from app.routes.templates import get_approved_template
+from app.routes.templates import get_approved_template, get_sendable_meta_template
 
 router = APIRouter(tags=["messages"])
 
@@ -195,6 +195,9 @@ async def send_message(
     has_template_request = bool(template_id or content_sid)
     purpose = (payload.message_purpose or "").strip().lower() or None
     tmpl = None
+    meta_graph_components = None
+    meta_template_name = None
+    meta_language_code = None
 
     if provider == "meta":
         if media_url or media_content_type or media_filename:
@@ -202,10 +205,10 @@ async def send_message(
                 status_code=400,
                 detail="Media sending is not yet supported for Meta WhatsApp conversations.",
             )
-        if template_id or content_sid or content_variables:
+        if content_sid:
             raise HTTPException(
                 status_code=400,
-                detail="Templates are not yet supported for Meta WhatsApp conversations.",
+                detail="Twilio Content templates cannot be sent on Meta WhatsApp conversations.",
             )
 
     # Live Chat marketing template consent: templates must never silently
@@ -222,7 +225,21 @@ async def send_message(
     else:
         purpose = purpose or "conversational"
 
-    if template_id:
+    if provider == "meta" and template_id:
+        from app.services.meta_templates import MetaTemplateError, build_graph_components
+
+        tmpl = await get_sendable_meta_template(user_id, template_id)
+        try:
+            meta_graph_components = build_graph_components(
+                template=tmpl, content_variables=content_variables
+            )
+        except MetaTemplateError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        template_id = str(tmpl["_id"])
+        meta_template_name = (tmpl.get("meta_template_name") or "").strip()
+        meta_language_code = (tmpl.get("meta_language_code") or "").strip()
+        content_sid = None
+    elif template_id:
         if media_url:
             raise HTTPException(status_code=400, detail="Cannot attach media to template messages")
         tmpl = await get_approved_template(user_id, template_id)
@@ -243,12 +260,19 @@ async def send_message(
                 status_code=400,
                 detail="content_sid must belong to an approved template for this account",
             )
+        if (tmpl.get("provider") or "twilio_content") == "meta":
+            raise HTTPException(
+                status_code=400,
+                detail="Meta templates cannot be sent as Twilio Content templates",
+            )
         template_id = str(tmpl["_id"])
+
+    has_template = bool(content_sid) or bool(meta_template_name)
 
     elig = get_whatsapp_send_eligibility(
         lead=lead,
         purpose=purpose,  # type: ignore[arg-type]
-        has_template=bool(content_sid),
+        has_template=has_template,
         has_media=bool(media_url),
         provider=provider,
     )
@@ -277,16 +301,20 @@ async def send_message(
         ]
     media_meta = media_fields_from_items(media_items, body or "")
     template_name = None
-    if content_sid and tmpl:
-        # tmpl is resolved above whenever content_sid/template_id is used
+    if tmpl:
         template_name = (tmpl.get("name") or "").strip() or None
-    if content_sid and not body:
-        # Store a human-readable label (not the raw Twilio Content SID).
+    if meta_template_name and not body:
+        display_message = f"Template: {template_name or meta_template_name}"
+        out_message_type = "template"
+    elif content_sid and not body:
         display_message = f"Template: {template_name or content_sid}"
+        out_message_type = "text"
     elif body:
         display_message = body
+        out_message_type = media_meta["message_type"] if media_items else "text"
     else:
         display_message = media_filename or f"[{media_meta['message_type']}]"
+        out_message_type = media_meta["message_type"] if media_items else "text"
 
     doc = await message_service.insert_message(
         user_id=user_id,
@@ -297,7 +325,7 @@ async def send_message(
         template_id=template_id,
         content_sid=content_sid,
         content_variables=content_variables,
-        message_type=media_meta["message_type"] if media_items else ("text" if body else "text"),
+        message_type=out_message_type,
         media_items=media_items or None,
         media_url=media_meta.get("media_url"),
         media_content_type=media_meta.get("media_content_type"),
@@ -318,6 +346,12 @@ async def send_message(
         "sender_type": "human",
         "provider_message_id": None,
     }
+    if meta_template_name:
+        extra_set["meta_template_name"] = meta_template_name
+        extra_set["meta_language_code"] = meta_language_code
+        extra_set["message_type"] = "template"
+        extra_set["twilio_sid"] = None
+        extra_set["content_sid"] = None
     if provider != "meta":
         extra_set["sender_number"] = (settings.TWILIO_WHATSAPP_FROM or "")[:40] or None
     await get_db().messages.update_one({"_id": doc["_id"]}, {"$set": extra_set})

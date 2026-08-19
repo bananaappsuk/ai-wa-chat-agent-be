@@ -46,4 +46,42 @@ def send_whatsapp_text(
     raise UnknownWhatsAppProviderError(f"Unknown WhatsApp provider: {prov or '(empty)'}")
 
 
-__all__ = ["send_whatsapp_text", "UnknownWhatsAppProviderError", "MetaWhatsAppError"]
+def send_whatsapp_template(
+    *,
+    provider: str,
+    to: str,
+    name: str,
+    language_code: str,
+    components: list | None = None,
+    user: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Send a template on Meta Cloud API. Twilio templates stay on the existing worker path."""
+    prov = (provider or "").strip().lower()
+    if prov == "meta":
+        pnid = None
+        if user:
+            raw = user.get("meta_phone_number_id")
+            pnid = str(raw).strip() if raw else None
+        result = meta_whatsapp_service.send_template(
+            to=to,
+            name=name,
+            language_code=language_code,
+            components=components or [],
+            phone_number_id=pnid or None,
+        )
+        return {
+            "provider": "meta",
+            "provider_message_id": result.provider_message_id,
+            "status": "sent",
+        }
+    raise UnknownWhatsAppProviderError(
+        f"Template send is not implemented for provider: {prov or '(empty)'}"
+    )
+
+
+__all__ = [
+    "send_whatsapp_text",
+    "send_whatsapp_template",
+    "UnknownWhatsAppProviderError",
+    "MetaWhatsAppError",
+]
