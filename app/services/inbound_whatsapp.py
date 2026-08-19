@@ -48,6 +48,10 @@ class InboundMessage:
     skip_ai_jobs: bool = False
     business_display_phone: str | None = None
     media_meta: dict[str, Any] | None = None
+    media_id: str | None = None
+    media_filename: str | None = None
+    media_mime_type: str | None = None
+    media_kind: str | None = None
 
 
 @dataclass
@@ -63,20 +67,28 @@ class InboundResult:
     trigger_message_id: str | None = None
 
 
-def _placeholder_body(message_type: str, body: str, media_meta: dict[str, Any] | None) -> str:
+def _placeholder_body(
+    message_type: str,
+    body: str,
+    media_meta: dict[str, Any] | None,
+    *,
+    provider: str = "",
+) -> str:
     text = (body or "").strip()
     if text:
         return text
+    mt = (message_type or "").strip().lower()
+    filename = ""
     if media_meta:
         filename = (media_meta.get("media_filename") or "").strip()
-        if filename:
-            return filename
-        mt = (media_meta.get("message_type") or message_type or "").strip().lower()
-        if mt in _MEDIA_PLACEHOLDERS:
-            return _MEDIA_PLACEHOLDERS[mt]
-        if mt and mt not in ("text", "unknown", ""):
-            return f"[{mt}]"
-    mt = (message_type or "").strip().lower()
+        mt = (media_meta.get("message_type") or mt).strip().lower()
+    # Meta: never use image/audio/video filenames as display (or as STOP/START stand-ins).
+    # Documents may show a safe filename. Twilio keeps filename-first display.
+    use_filename = bool(filename) and (
+        (provider or "").strip().lower() != "meta" or mt == "document"
+    )
+    if use_filename:
+        return filename
     if mt in _MEDIA_PLACEHOLDERS:
         return _MEDIA_PLACEHOLDERS[mt]
     if mt and mt not in ("text", "unknown", ""):
@@ -255,6 +267,46 @@ async def process_inbound_message(
             logger.exception("record_activity failed for self_sender_ignored")
         return InboundResult(outcome="self_sender", user_id=user_id)
 
+    media_meta = dict(inbound.media_meta or {})
+    if (
+        provider == "meta"
+        and (inbound.media_id or "").strip()
+        and not (media_meta.get("media_url") or media_meta.get("media_items"))
+    ):
+        from app.services.meta_media import (
+            MetaMediaError,
+            download_and_store_meta_media,
+            media_pnid_allows_download,
+        )
+
+        if not media_pnid_allows_download(user=user, webhook_pnid=inbound.business_identifier):
+            logger.warning(
+                "meta inbound media skipped PNID mismatch user_id=%s id=%s",
+                user_id,
+                (mid or "")[:80],
+            )
+        else:
+            try:
+                media_meta = await download_and_store_meta_media(
+                    media_id=inbound.media_id or "",
+                    user_id=user_id,
+                    filename_hint=inbound.media_filename,
+                    declared_mime=inbound.media_mime_type,
+                    kind=inbound.media_kind or inbound.message_type,
+                )
+            except MetaMediaError:
+                logger.warning(
+                    "meta inbound media download failed id=%s",
+                    (mid or "")[:80],
+                )
+                media_meta = {}
+            except Exception:
+                logger.exception(
+                    "meta inbound media unexpected error id=%s",
+                    (mid or "")[:80],
+                )
+                media_meta = {}
+
     body = (inbound.body or "").strip()
     optout = is_optout_keyword(body)
     optin = is_optin_keyword(body)
@@ -269,8 +321,9 @@ async def process_inbound_message(
     )
     lead_id = str(lead["_id"])
 
-    media_meta = inbound.media_meta or {}
-    display_body = _placeholder_body(inbound.message_type, body, media_meta)
+    display_body = _placeholder_body(
+        inbound.message_type, body, media_meta, provider=provider
+    )
 
     msg_doc: dict[str, Any] = {
         "user_id": user_id,

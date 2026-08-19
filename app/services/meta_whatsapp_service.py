@@ -42,6 +42,12 @@ class InboundWhatsAppMessage:
     raw_type: str | None = None
     profile_name: str | None = None
     display_phone_number: str | None = None
+    media_id: str | None = None
+    mime_type: str | None = None
+    filename: str | None = None
+    sha256: str | None = None
+    voice: bool = False
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -241,6 +247,37 @@ def verify_webhook_subscribe(*, mode: str | None, token: str | None) -> bool:
     return hmac.compare_digest(provided, expected)
 
 
+def _media_block(msg: dict[str, Any], msg_type: str) -> dict[str, Any] | None:
+    """Normalize Meta media object fields. Does not fetch Graph."""
+    key = msg_type if msg_type != "voice" else "audio"
+    if msg_type == "sticker":
+        key = "sticker"
+    block = msg.get(key)
+    if msg_type == "voice" and not isinstance(block, dict):
+        block = msg.get("voice")
+    if not isinstance(block, dict):
+        return None
+    media_id = str(block.get("id") or "").strip() or None
+    if not media_id:
+        return None
+    kind = "audio" if msg_type in ("audio", "voice") else ("image" if msg_type == "sticker" else msg_type)
+    caption = block.get("caption")
+    caption_s = str(caption).strip() if caption is not None and str(caption).strip() else None
+    filename = str(block.get("filename") or "").strip() or None
+    mime = str(block.get("mime_type") or "").strip() or None
+    sha = str(block.get("sha256") or "").strip() or None
+    voice = bool(block.get("voice")) or msg_type == "voice"
+    return {
+        "media_id": media_id,
+        "mime_type": mime,
+        "filename": filename,
+        "caption": caption_s,
+        "sha256": sha,
+        "voice": voice,
+        "kind": kind,
+    }
+
+
 def parse_inbound_messages(payload: dict[str, Any]) -> list[InboundWhatsAppMessage]:
     """Extract normalized inbound messages from a Meta Cloud API webhook JSON body."""
     out: list[InboundWhatsAppMessage] = []
@@ -271,10 +308,14 @@ def parse_inbound_messages(payload: dict[str, Any]) -> list[InboundWhatsAppMessa
                     continue
                 msg_type = str(msg.get("type") or "unknown")
                 text_body = None
+                media = None
                 if msg_type == "text" and isinstance(msg.get("text"), dict):
                     text_body = msg["text"].get("body")
                     if text_body is not None:
                         text_body = str(text_body)
+                elif msg_type in ("image", "document", "audio", "video", "voice", "sticker"):
+                    media = _media_block(msg, msg_type)
+                    text_body = (media.get("caption") if media else None) or ""
                 from_raw = str(msg.get("from") or "")
                 from_norm = normalize_meta_phone(from_raw) or from_raw
                 profile_name = name_by_wa.get(from_raw) or name_by_wa.get(from_raw.lstrip("+"))
@@ -290,6 +331,12 @@ def parse_inbound_messages(payload: dict[str, Any]) -> list[InboundWhatsAppMessa
                         raw_type=msg_type,
                         profile_name=profile_name,
                         display_phone_number=display_phone,
+                        media_id=(media or {}).get("media_id"),
+                        mime_type=(media or {}).get("mime_type"),
+                        filename=(media or {}).get("filename"),
+                        sha256=(media or {}).get("sha256"),
+                        voice=bool((media or {}).get("voice")),
+                        kind=(media or {}).get("kind"),
                     )
                 )
     return out
