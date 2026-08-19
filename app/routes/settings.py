@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
 from app.db.mongo import get_db
@@ -25,6 +25,7 @@ from app.services.ai_quality import validate_output
 from app.services.ai_quota import usage_snapshot
 from app.services.activity import record_activity
 from app.services.whatsapp_status import whatsapp_status_payload
+from app.services.whatsapp_settings import apply_whatsapp_settings_patch, build_whatsapp_settings
 from bson import ObjectId
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -32,7 +33,80 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 @router.get("/whatsapp-status")
 async def whatsapp_status(_user: dict = Depends(current_user)) -> dict:
+    """Legacy Twilio platform health (unchanged contract)."""
     return whatsapp_status_payload()
+
+
+@router.get("/whatsapp")
+async def get_whatsapp_settings(user: dict = Depends(current_user)) -> dict:
+    return build_whatsapp_settings(user)
+
+
+class TwilioWhatsAppPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    routing_number: str | None = Field(default=None, max_length=32)
+
+
+class MetaWhatsAppPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phone_number_id: str | None = Field(default=None, max_length=32)
+    waba_id: str | None = Field(default=None, max_length=32)
+    display_phone_number: str | None = Field(default=None, max_length=32)
+
+
+class WhatsAppSettingsPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    twilio: TwilioWhatsAppPatch | None = None
+    meta: MetaWhatsAppPatch | None = None
+    provider: str | None = Field(default=None, max_length=20)
+    access_token: str | None = None
+    app_secret: str | None = None
+    auth_token: str | None = None
+    account_sid: str | None = None
+    webhook_verify_token: str | None = None
+
+
+@router.patch("/whatsapp")
+async def patch_whatsapp_settings(
+    body: WhatsAppSettingsPatch, user: dict = Depends(current_user)
+) -> dict:
+    require_permission(user, "change_account_settings")
+    if any(
+        getattr(body, k) is not None
+        for k in (
+            "provider",
+            "access_token",
+            "app_secret",
+            "auth_token",
+            "account_sid",
+            "webhook_verify_token",
+        )
+    ):
+        raise HTTPException(status_code=400, detail="Unsupported fields")
+    raw = body.model_dump(exclude_unset=True)
+    raw.pop("provider", None)
+    data = {k: v for k, v in raw.items() if k in ("twilio", "meta") and v is not None}
+    if not data:
+        raise HTTPException(status_code=400, detail="No valid fields")
+    result = await apply_whatsapp_settings_patch(get_db(), user, data)
+    audit(
+        "settings.whatsapp_update",
+        user_id=str(user["_id"]),
+        request_id=get_request_id(),
+        extra={"fields": result["changed"]},
+    )
+    await record_activity(
+        get_db(),
+        tenant_id=str(user["_id"]),
+        event_type="settings.whatsapp_updated",
+        summary="WhatsApp integration settings updated",
+        actor_id=str(user["_id"]),
+        resource_type="settings",
+        resource_id="whatsapp",
+        metadata={"fields": ",".join(result["changed"])},
+    )
+    fresh = await get_db().users.find_one({"_id": ObjectId(user["_id"])})
+    return build_whatsapp_settings(fresh or user)
 
 
 @router.get("/ai")

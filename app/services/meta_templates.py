@@ -375,4 +375,9 @@ async def sync_meta_templates_for_user(db, *, user: dict) -> dict[str, Any]:
         set_doc["created_at"] = created
         await db.templates.update_one(filt, {"$set": set_doc}, upsert=True)
         upserted += 1
+    if user.get("_id") is not None:
+        await db.users.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"meta_last_template_sync_at": now, "updated_at": now}},
+        )
     return {"ok": True, "synced": upserted, "skipped": skipped, "fetched": len(graph_rows)}
