@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     META_TOKEN_ENCRYPTION_KEY: str = ""
     # Dev/test only: allow env META_ACCESS_TOKEN for users with meta_connection_status=legacy_poc.
     META_ALLOW_LEGACY_POC_TOKEN: bool = False
+    # Facebook Login for Business Embedded Signup v4 configuration ID (App Dashboard).
+    META_EMBEDDED_SIGNUP_CONFIG_ID: str = ""
+    META_ONBOARDING_STATE_TTL_SECONDS: int = 600
 
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
@@ -332,6 +335,13 @@ class Settings(BaseSettings):
         )
 
     @property
+    def embedded_signup_available(self) -> bool:
+        return bool(
+            (self.META_APP_ID or "").strip()
+            and (self.META_EMBEDDED_SIGNUP_CONFIG_ID or "").strip()
+        )
+
+    @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
@@ -439,6 +449,16 @@ class Settings(BaseSettings):
                 )
             elif enc == (self.JWT_SECRET or "").strip():
                 errors.append("META_TOKEN_ENCRYPTION_KEY must not equal JWT_SECRET")
+
+            if (self.META_EMBEDDED_SIGNUP_CONFIG_ID or "").strip():
+                if not (self.META_APP_ID or "").strip():
+                    errors.append(
+                        "META_APP_ID is required when META_EMBEDDED_SIGNUP_CONFIG_ID is set"
+                    )
+                if not (self.META_APP_SECRET or "").strip():
+                    errors.append(
+                        "META_APP_SECRET is required when META_EMBEDDED_SIGNUP_CONFIG_ID is set"
+                    )
 
             if self.AI_FEATURES_ENABLED and not (self.OPENAI_API_KEY or "").strip():
                 errors.append("OPENAI_API_KEY is required when AI_FEATURES_ENABLED=true")

@@ -107,6 +107,8 @@ def _meta_slice(user: dict) -> dict[str, Any]:
         warnings.append("Meta credentials are missing or invalid for this account")
     if pnid and not waba:
         warnings.append("Meta WABA ID is not set")
+    if conn == "legacy_poc":
+        warnings.append("This account is using the legacy proof-of-concept Meta connection")
 
     if not routing_ready:
         status = "not_configured"
@@ -131,6 +133,7 @@ def _meta_slice(user: dict) -> dict[str, Any]:
         "token_expires_at": _iso(user.get("meta_token_expires_at")),
         "webhook_ready": None,
         "last_template_sync_at": _iso(user.get("meta_last_template_sync_at")),
+        "onboarding_source": str(user.get("meta_onboarding_source") or "").strip() or None,
         "warnings": warnings,
     }
 
@@ -141,7 +144,7 @@ def build_whatsapp_settings(user: Optional[dict]) -> dict[str, Any]:
     out = {
         "twilio": _twilio_slice(doc),
         "meta": _meta_slice(doc),
-        "embedded_signup": {"available": False},
+        "embedded_signup": {"available": bool(settings.embedded_signup_available)},
     }
     blob_keys = set(out.keys()) | set(out["twilio"].keys()) | set(out["meta"].keys())
     for needle in ("access_token", "app_secret", "auth_token", "account_sid"):

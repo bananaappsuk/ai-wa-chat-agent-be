@@ -178,6 +178,52 @@ def delete_credentials_for_user(*, user_id: str, db=None) -> None:
         _coll(db).delete_one({"user_id": uid})
 
 
+def snapshot_credentials_row(*, user_id: str, db=None) -> Optional[dict[str, Any]]:
+    """Copy ciphertext row for reconnect rollback. Never decrypts."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return None
+    row = _coll(db).find_one({"user_id": uid})
+    if not row:
+        return None
+    return {
+        "user_id": uid,
+        "ciphertext": row.get("ciphertext"),
+        "algorithm": row.get("algorithm"),
+        "key_id": row.get("key_id"),
+        "expires_at": row.get("expires_at"),
+        "scopes": row.get("scopes"),
+        "created_at": row.get("created_at"),
+    }
+
+
+def restore_credentials_snapshot(*, user_id: str, snapshot: Optional[dict[str, Any]], db=None) -> None:
+    """Restore prior ciphertext after a failed reconnect bind. Mongo is not transactional."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return
+    if not snapshot or not snapshot.get("ciphertext"):
+        delete_credentials_for_user(user_id=uid, db=db)
+        return
+    coll = _coll(db)
+    fields = {
+        "ciphertext": snapshot.get("ciphertext"),
+        "algorithm": snapshot.get("algorithm") or ALG_AESGCM,
+        "key_id": snapshot.get("key_id") or KEY_ID_DEFAULT,
+        "expires_at": snapshot.get("expires_at"),
+        "scopes": snapshot.get("scopes"),
+        "updated_at": utcnow(),
+    }
+    existing = coll.find_one({"user_id": uid})
+    if existing:
+        coll.update_one({"user_id": uid}, {"$set": fields})
+        return
+    doc = dict(fields)
+    doc["user_id"] = uid
+    doc["created_at"] = snapshot.get("created_at") or utcnow()
+    coll.insert_one(doc)
+
+
 def get_meta_credentials_for_user(user: Optional[dict], *, db=None) -> MetaTenantCredentials:
     """Return tenant Graph credentials. Never use env token unless legacy_poc policy matches."""
     if production_blocks_legacy_flag():

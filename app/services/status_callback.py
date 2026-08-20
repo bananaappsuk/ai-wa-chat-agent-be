@@ -91,9 +91,13 @@ async def apply_meta_status_update(
     user = None
     if user_id and ObjectId.is_valid(user_id):
         user = await db.users.find_one({"_id": ObjectId(user_id)})
-    user_pnid = _pnid((user or {}).get("meta_phone_number_id"))
+    user_pnids = {
+        _pnid((user or {}).get("meta_phone_number_id")),
+        _pnid((user or {}).get("meta_last_phone_number_id")),
+    }
+    user_pnids.discard("")
 
-    if webhook_pnid and user_pnid and webhook_pnid != user_pnid:
+    if webhook_pnid and user_pnids and webhook_pnid not in user_pnids:
         logger.warning(
             "Meta status PNID mismatch user_id=%s wamid_suffix=...%s",
             user_id,

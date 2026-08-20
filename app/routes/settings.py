@@ -109,6 +109,132 @@ async def patch_whatsapp_settings(
     return build_whatsapp_settings(fresh or user)
 
 
+class MetaOnboardingCompleteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    state: str = Field(..., min_length=8, max_length=128)
+    code: str = Field(..., min_length=8, max_length=4096)
+    waba_id: str = Field(..., min_length=5, max_length=32)
+    phone_number_id: str = Field(..., min_length=5, max_length=32)
+    display_phone_number: str | None = Field(default=None, max_length=32)
+    business_id: str | None = Field(default=None, max_length=32)
+
+
+@router.post("/whatsapp/meta/onboarding/start")
+async def start_meta_onboarding(user: dict = Depends(current_user)) -> dict:
+    require_permission(user, "change_account_settings")
+    rate_limit_user(
+        str(user["_id"]),
+        bucket="meta_onboarding_start",
+        limit=10,
+        window_sec=60,
+    )
+    from app.services.meta_onboarding import start_onboarding_session
+
+    out = start_onboarding_session(user_id=str(user["_id"]))
+    audit(
+        "settings.meta_onboarding_started",
+        user_id=str(user["_id"]),
+        request_id=get_request_id(),
+        extra={"graph_version": out.get("graph_version")},
+    )
+    await record_activity(
+        get_db(),
+        tenant_id=str(user["_id"]),
+        event_type="settings.meta_onboarding_started",
+        summary="Meta WhatsApp onboarding started",
+        actor_id=str(user["_id"]),
+        resource_type="settings",
+        resource_id="whatsapp",
+    )
+    return out
+
+
+@router.post("/whatsapp/meta/onboarding/complete")
+async def complete_meta_onboarding(
+    body: MetaOnboardingCompleteBody, user: dict = Depends(current_user)
+) -> dict:
+    require_permission(user, "change_account_settings")
+    rate_limit_user(
+        str(user["_id"]),
+        bucket="meta_onboarding_complete",
+        limit=10,
+        window_sec=60,
+    )
+    from app.services.meta_onboarding import complete_onboarding
+
+    try:
+        result = await complete_onboarding(
+            get_db(),
+            user=user,
+            state=body.state,
+            code=body.code,
+            waba_id=body.waba_id,
+            phone_number_id=body.phone_number_id,
+            display_phone_number=body.display_phone_number,
+            business_id=body.business_id,
+        )
+    except HTTPException as exc:
+        audit(
+            "settings.meta_onboarding_failed",
+            user_id=str(user["_id"]),
+            request_id=get_request_id(),
+            result="error",
+            extra={"status": exc.status_code},
+        )
+        raise
+    audit(
+        result["audit_action"],
+        user_id=str(user["_id"]),
+        request_id=get_request_id(),
+        extra={"status": result["status"], **(result.get("masked") or {})},
+    )
+    await record_activity(
+        get_db(),
+        tenant_id=str(user["_id"]),
+        event_type=result["audit_action"],
+        summary="Meta WhatsApp connected" if result["ok"] else "Meta WhatsApp onboarding needs attention",
+        actor_id=str(user["_id"]),
+        resource_type="settings",
+        resource_id="whatsapp",
+        metadata={"status": result["status"]},
+    )
+    fresh = await get_db().users.find_one({"_id": ObjectId(user["_id"])})
+    payload = build_whatsapp_settings(fresh or user)
+    payload["onboarding"] = {"ok": result["ok"], "status": result["status"], "warnings": result.get("warnings") or []}
+    return payload
+
+
+@router.post("/whatsapp/meta/disconnect")
+async def disconnect_meta_whatsapp(user: dict = Depends(current_user)) -> dict:
+    require_permission(user, "change_account_settings")
+    rate_limit_user(
+        str(user["_id"]),
+        bucket="meta_disconnect",
+        limit=10,
+        window_sec=60,
+    )
+    from app.services.meta_onboarding import disconnect_meta
+
+    result = await disconnect_meta(get_db(), user=user)
+    audit(
+        "settings.meta_disconnected",
+        user_id=str(user["_id"]),
+        request_id=get_request_id(),
+        extra=result.get("masked") or {},
+    )
+    await record_activity(
+        get_db(),
+        tenant_id=str(user["_id"]),
+        event_type="settings.meta_disconnected",
+        summary="Meta WhatsApp disconnected",
+        actor_id=str(user["_id"]),
+        resource_type="settings",
+        resource_id="whatsapp",
+    )
+    fresh = await get_db().users.find_one({"_id": ObjectId(user["_id"])})
+    return build_whatsapp_settings(fresh or user)
+
+
 @router.get("/ai")
 async def get_ai_settings(user: dict = Depends(current_user)) -> dict:
     require_permission(user, "change_account_settings")
