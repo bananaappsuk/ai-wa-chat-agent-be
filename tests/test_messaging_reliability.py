@@ -121,7 +121,9 @@ def test_error_classification_retryable_and_not():
     assert classify_send_error("blacklisted") == "consent_blocked"
     assert not is_retryable_category(classify_send_error("opted out"))
     assert classify_send_error("HTTP 429 rate limit") == "provider_rate_limited"
-    assert classify_send_error("Error 63016") == "window_closed"
+    # 63016 often means Content Template was not Meta-approved (see twilio_errors._CODE_MAP).
+    assert classify_send_error("Error 63016") == "template_error"
+    assert not is_retryable_category(classify_send_error("Error 63016"))
 
 
 def test_retry_backoff_within_limits():

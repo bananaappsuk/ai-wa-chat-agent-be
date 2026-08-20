@@ -273,9 +273,12 @@ async def test_customer_create_reuses_existing(monkeypatch):
 
     user = {"_id": ObjectId(), "stripe_customer_id": "cus_existing", "email": "a@b.com"}
     db = MagicMock()
-    with patch.object(stripe_service, "ensure_stripe"):
+    with patch.object(stripe_service, "ensure_stripe"), patch.object(
+        stripe_service.stripe.Customer, "retrieve", return_value=MagicMock()
+    ) as retrieve:
         cid = await stripe_service.get_or_create_customer_async(db, user)
     assert cid == "cus_existing"
+    retrieve.assert_called_once_with("cus_existing")
     db.users.update_one.assert_not_called()
 
 

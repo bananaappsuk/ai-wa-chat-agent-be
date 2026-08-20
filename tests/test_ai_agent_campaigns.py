@@ -396,7 +396,13 @@ def test_kb_mode_closed_window_uses_fallback_template_not_generative_ai():
         )
     assert gen.ok
     assert gen.content_source in ("template", "ai_template_variables")
-    assert gen.message is None or gen.message == ""
+    assert gen.template_content_sid == "HXabc"
+    assert gen.model is None
+    assert gen.input_tokens == 0
+    assert gen.output_tokens == 0
+    # Preview placeholder when Twilio template body fetch is unavailable in tests.
+    assert gen.message
+    assert "[WhatsApp template HXabc]" in gen.message
     assert "kb_mode_closed_window_template_no_generative_ai" in (gen.warnings or [])
 
 
