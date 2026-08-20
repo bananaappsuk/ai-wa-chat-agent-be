@@ -326,6 +326,24 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
     if not recipient:
         return
 
+    from app.services.campaign_provider import stored_provider as _stored_provider
+
+    camp_prov = _stored_provider(campaign)
+    if camp_prov == "meta" and (recipient.get("provider_message_id") or "").strip():
+        db.campaign_recipients.update_one(
+            {"_id": recipient["_id"]},
+            {
+                "$set": {
+                    "status": "sent",
+                    "provider": "meta",
+                    "updated_at": _utcnow(),
+                }
+            },
+        )
+        _refresh_campaign_counters(db, user_id, campaign_id)
+        _maybe_complete_campaign(db, user_id, campaign_id)
+        return
+
     _publish(user_id, "campaign:recipient_updated", _serialize(recipient))
     phone = recipient.get("phone")
 
@@ -444,11 +462,22 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                 content_sid = sid or content_sid
                 has_template = bool(content_sid or template_id)
 
+        from app.services.campaign_provider import stored_provider as _stored_provider
+
+        camp_prov = _stored_provider(campaign)
+        if camp_prov == "meta":
+            has_template = True
+        if camp_prov not in ("twilio", "meta"):
+            raise RuntimeError(f"Unknown WhatsApp provider: {camp_prov}")
+
+        user = db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(str(user_id)) else None
         elig = get_whatsapp_send_eligibility(
             lead=lead or {"phone": phone},
             phone=phone,
             purpose="campaign",
             has_template=has_template,
+            provider=camp_prov,
+            user=user,
         )
         if not elig.allowed:
             try:
@@ -518,7 +547,95 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                 body = None
             media_url = campaign.get("media_url") if not content_sid else None
 
-            if content_sid or template_id:
+            from app.services.campaign_provider import stored_provider as _stored_provider
+
+            camp_prov = _stored_provider(campaign)
+            if camp_prov == "meta":
+                from app.services.meta_templates import MetaTemplateError, build_graph_components, is_meta_template_sendable
+                from app.services.whatsapp_outbound import send_whatsapp_template
+
+                if ai_mode:
+                    raise RuntimeError("AI Agent campaigns cannot use Meta WhatsApp templates in this version.")
+                tid = campaign.get("template_id")
+                tmpl = None
+                if tid and ObjectId.is_valid(str(tid)):
+                    tmpl = db.templates.find_one(
+                        {"_id": ObjectId(str(tid)), "user_id": user_id, "provider": "meta"}
+                    )
+                if not tmpl or not is_meta_template_sendable(tmpl):
+                    raise RuntimeError("This Meta template cannot be sent (not approved or not supported).")
+                try:
+                    components = build_graph_components(
+                        template=tmpl,
+                        content_variables=content_variables or campaign.get("content_variables"),
+                    )
+                except MetaTemplateError as exc:
+                    raise RuntimeError(str(exc)) from exc
+                user = db.users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+                result = send_whatsapp_template(
+                    provider="meta",
+                    to=phone,
+                    name=(tmpl.get("meta_template_name") or campaign.get("meta_template_name") or ""),
+                    language_code=(tmpl.get("meta_language_code") or campaign.get("meta_language_code") or ""),
+                    components=components,
+                    user=user,
+                )
+                wamid = result.get("provider_message_id")
+                display = f"Template: {tmpl.get('name') or tmpl.get('meta_template_name')}"
+                try:
+                    from app.observability.metrics import inc_campaign_send, inc_outbound
+
+                    inc_campaign_send()
+                    inc_outbound(ok=True)
+                except Exception:
+                    pass
+                msg_doc = {
+                    "user_id": user_id,
+                    "lead_id": recipient.get("lead_id"),
+                    "direction": "outbound",
+                    "message": display or "[campaign]",
+                    "status": "sent",
+                    "provider": "meta",
+                    "provider_message_id": wamid,
+                    "message_type": "template",
+                    "twilio_sid": None,
+                    "campaign_id": campaign_id,
+                    "campaign_recipient_id": str(recipient["_id"]),
+                    "message_purpose": "campaign",
+                    "consent_status_at_send": elig.consent_status,
+                    "policy_decision": "allowed",
+                    "policy_reason": elig.reason_code,
+                    "template_id": str(tmpl.get("_id") or tid) if (tmpl or tid) else None,
+                    "template_name": (tmpl.get("name") or None) if tmpl else None,
+                    "meta_template_name": tmpl.get("meta_template_name") if tmpl else campaign.get("meta_template_name"),
+                    "meta_language_code": tmpl.get("meta_language_code") if tmpl else campaign.get("meta_language_code"),
+                    "content_variables": content_variables or campaign.get("content_variables"),
+                    "content_sid": None,
+                    "created_at": _utcnow(),
+                }
+                ins = db.messages.insert_one(msg_doc)
+                updated = db.campaign_recipients.find_one_and_update(
+                    {"_id": recipient["_id"], "status": "processing"},
+                    {
+                        "$set": {
+                            "status": "sent",
+                            "message_id": str(ins.inserted_id),
+                            "provider": "meta",
+                            "provider_message_id": wamid,
+                            "twilio_sid": None,
+                            "message_purpose": "campaign",
+                            "error_code": None,
+                            "error_message": None,
+                            "updated_at": _utcnow(),
+                        }
+                    },
+                    return_document=ReturnDocument.AFTER,
+                )
+                if updated:
+                    _publish(user_id, "campaign:recipient_updated", _serialize(updated))
+                _refresh_campaign_counters(db, user_id, campaign_id)
+                _maybe_complete_campaign(db, user_id, campaign_id)
+            elif content_sid or template_id:
                 if template_id and ObjectId.is_valid(str(template_id)):
                     tmpl = db.templates.find_one({"_id": ObjectId(str(template_id)), "user_id": user_id})
                     if not tmpl or tmpl.get("status") != "approved" or not tmpl.get("content_sid"):
@@ -601,65 +718,68 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                 result = twilio_service.send_whatsapp(phone, body=body, media_url=resolved_media)
                 display = body or "[media]"
 
-            try:
-                from app.observability.metrics import inc_campaign_send, inc_outbound
-                inc_campaign_send()
-                inc_outbound(ok=True)
-            except Exception:
-                pass
+            if camp_prov != "meta":
+                try:
+                    from app.observability.metrics import inc_campaign_send, inc_outbound
+                    inc_campaign_send()
+                    inc_outbound(ok=True)
+                except Exception:
+                    pass
 
-            msg_doc = {
-                "user_id": user_id,
-                "lead_id": recipient.get("lead_id"),
-                "direction": "outbound",
-                "message": display or "[campaign]",
-                "status": "sent",
-                "twilio_sid": result.get("sid"),
-                "campaign_id": campaign_id,
-                "campaign_recipient_id": str(recipient["_id"]),
-                "message_purpose": "campaign",
-                "consent_status_at_send": elig.consent_status,
-                "policy_decision": "allowed",
-                "policy_reason": elig.reason_code,
-                "template_id": str(template_id) if template_id else None,
-                "content_sid": content_sid,
-                "created_at": _utcnow(),
-            }
-            if media_url:
-                msg_doc["media_url"] = media_url
-            ins = db.messages.insert_one(msg_doc)
+                msg_doc = {
+                    "user_id": user_id,
+                    "lead_id": recipient.get("lead_id"),
+                    "direction": "outbound",
+                    "message": display or "[campaign]",
+                    "status": "sent",
+                    "twilio_sid": result.get("sid"),
+                    "campaign_id": campaign_id,
+                    "campaign_recipient_id": str(recipient["_id"]),
+                    "message_purpose": "campaign",
+                    "consent_status_at_send": elig.consent_status,
+                    "policy_decision": "allowed",
+                    "policy_reason": elig.reason_code,
+                    "template_id": str(template_id) if template_id else None,
+                    "content_sid": content_sid,
+                    "created_at": _utcnow(),
+                }
+                if media_url:
+                    msg_doc["media_url"] = media_url
+                ins = db.messages.insert_one(msg_doc)
 
-            updated = db.campaign_recipients.find_one_and_update(
-                {"_id": recipient["_id"], "status": "processing"},
-                {
-                    "$set": {
-                        "status": "sent",
-                        "message_id": str(ins.inserted_id),
-                        "twilio_sid": result.get("sid"),
-                        "message_purpose": "campaign",
-                        "error_code": None,
-                        "error_message": None,
-                        "updated_at": _utcnow(),
-                    }
-                },
-                return_document=ReturnDocument.AFTER,
-            )
-            if updated:
-                _publish(user_id, "campaign:recipient_updated", _serialize(updated))
-            _refresh_campaign_counters(db, user_id, campaign_id)
-            _maybe_complete_campaign(db, user_id, campaign_id)
+                updated = db.campaign_recipients.find_one_and_update(
+                    {"_id": recipient["_id"], "status": "processing"},
+                    {
+                        "$set": {
+                            "status": "sent",
+                            "message_id": str(ins.inserted_id),
+                            "twilio_sid": result.get("sid"),
+                            "message_purpose": "campaign",
+                            "error_code": None,
+                            "error_message": None,
+                            "updated_at": _utcnow(),
+                        }
+                    },
+                    return_document=ReturnDocument.AFTER,
+                )
+                if updated:
+                    _publish(user_id, "campaign:recipient_updated", _serialize(updated))
+                _refresh_campaign_counters(db, user_id, campaign_id)
+                _maybe_complete_campaign(db, user_id, campaign_id)
         finally:
             release_send_permit()
 
     except Exception as exc:
         from app.services.whatsapp_template_approval import WhatsAppTemplateNotApprovedError
 
+        from app.services.campaign_provider import classify_bulk_send_error, stored_provider
+
         err = (
             exc.user_message()
             if isinstance(exc, WhatsAppTemplateNotApprovedError)
             else str(exc)[:500]
         )
-        category = classify_send_error(exc)
+        category = classify_bulk_send_error(exc, provider=stored_provider(campaign))
         attempts = int(recipient.get("attempt_count") or 1)
         max_r = max(wa_max_retries(), int(getattr(settings, "CAMPAIGN_MAX_RETRIES", 3)))
         campaign = db.campaigns.find_one({"_id": ObjectId(campaign_id)})

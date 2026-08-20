@@ -47,6 +47,31 @@ class Settings(BaseSettings):
     TWILIO_VALIDATE_SIGNATURES: bool | None = None
     TRUSTED_PROXY_COUNT: int = 1
 
+    # WhatsApp transport selector. Default remains Twilio for all existing tenants.
+    # Meta Cloud API POC is additive; set to "meta" only for explicit Meta experiments.
+    WHATSAPP_PROVIDER: str = "twilio"
+
+    # Legacy dev/test only — never production Graph send/routing authority.
+    META_ACCESS_TOKEN: str = ""
+    META_PHONE_NUMBER_ID: str = ""
+    META_WABA_ID: str = ""
+    META_APP_ID: str = ""
+    META_APP_SECRET: str = ""
+    META_WEBHOOK_VERIFY_TOKEN: str = ""
+    META_GRAPH_VERSION: str = "v21.0"
+    # When true (default), POST /api/webhook/meta/whatsapp requires valid X-Hub-Signature-256.
+    # Set false only for local debugging; never disable in staging/production.
+    META_WEBHOOK_VALIDATE_SIGNATURE: bool = True
+    META_HTTP_TIMEOUT_SECONDS: float = 30.0
+    # AES-GCM key for tenant Meta access tokens (32-byte utf-8, or base64 of 16/24/32 bytes).
+    # Distinct from JWT_SECRET. Required in staging/production.
+    META_TOKEN_ENCRYPTION_KEY: str = ""
+    # Dev/test only: allow env META_ACCESS_TOKEN for users with meta_connection_status=legacy_poc.
+    META_ALLOW_LEGACY_POC_TOKEN: bool = False
+    # Facebook Login for Business Embedded Signup v4 configuration ID (App Dashboard).
+    META_EMBEDDED_SIGNUP_CONFIG_ID: str = ""
+    META_ONBOARDING_STATE_TTL_SECONDS: int = 600
+
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_FALLBACK_MODEL: str = "gpt-4o-mini"
@@ -298,6 +323,20 @@ class Settings(BaseSettings):
         return bool(self.TWILIO_VALIDATE_SIGNATURE)
 
     @property
+    def whatsapp_provider(self) -> str:
+        raw = (self.WHATSAPP_PROVIDER or "twilio").strip().lower()
+        return raw if raw in ("twilio", "meta") else "twilio"
+
+    @property
+    def embedded_signup_available(self) -> bool:
+        """True only when the API can complete Embedded Signup (secret stays server-side)."""
+        return bool(
+            (self.META_APP_ID or "").strip()
+            and (self.META_APP_SECRET or "").strip()
+            and (self.META_EMBEDDED_SIGNUP_CONFIG_ID or "").strip()
+        )
+
+    @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
@@ -383,6 +422,47 @@ class Settings(BaseSettings):
                 errors.append(
                     "TWILIO_VALIDATE_SIGNATURE / TWILIO_VALIDATE_SIGNATURES must be true "
                     f"when APP_ENV={self.app_env}"
+                )
+
+            if not self.META_WEBHOOK_VALIDATE_SIGNATURE:
+                errors.append(
+                    "META_WEBHOOK_VALIDATE_SIGNATURE must be true "
+                    f"when APP_ENV={self.app_env}"
+                )
+
+            if self.META_ALLOW_LEGACY_POC_TOKEN:
+                errors.append(
+                    "META_ALLOW_LEGACY_POC_TOKEN must be false "
+                    f"when APP_ENV={self.app_env}"
+                )
+
+            enc = (self.META_TOKEN_ENCRYPTION_KEY or "").strip()
+            if not enc:
+                errors.append(
+                    "META_TOKEN_ENCRYPTION_KEY is required "
+                    f"when APP_ENV={self.app_env}"
+                )
+            elif enc == (self.JWT_SECRET or "").strip():
+                errors.append("META_TOKEN_ENCRYPTION_KEY must not equal JWT_SECRET")
+            else:
+                try:
+                    from app.services.meta_credentials import MetaCredentialsError, load_encryption_key
+
+                    load_encryption_key(enc)
+                except MetaCredentialsError as exc:
+                    errors.append(str(exc))
+
+            if not (self.META_APP_ID or "").strip():
+                errors.append(
+                    f"META_APP_ID is required when APP_ENV={self.app_env}"
+                )
+            if not (self.META_APP_SECRET or "").strip():
+                errors.append(
+                    f"META_APP_SECRET is required when APP_ENV={self.app_env}"
+                )
+            if not (self.META_WEBHOOK_VERIFY_TOKEN or "").strip():
+                errors.append(
+                    f"META_WEBHOOK_VERIFY_TOKEN is required when APP_ENV={self.app_env}"
                 )
 
             if self.AI_FEATURES_ENABLED and not (self.OPENAI_API_KEY or "").strip():

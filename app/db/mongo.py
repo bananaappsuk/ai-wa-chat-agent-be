@@ -107,6 +107,13 @@ async def init_indexes() -> None:
         unique=True,
         partialFilterExpression={"twilio_whatsapp_to": {"$type": "string"}},
     )
+    # Meta Cloud API inbound routing — unique when a Phone Number ID is stored.
+    await db.users.create_index(
+        "meta_phone_number_id",
+        unique=True,
+        partialFilterExpression={"meta_phone_number_id": {"$type": "string"}},
+    )
+    await db.meta_credentials.create_index("user_id", unique=True)
     await _ensure_leads_phone_index(db)
     await db.leads.create_index([("user_id", 1), ("created_at", -1)])
     await db.leads.create_index([("user_id", 1), ("updated_at", -1)])
@@ -121,6 +128,14 @@ async def init_indexes() -> None:
     await db.messages.create_index([("user_id", 1), ("created_at", -1)])
     # Kept non-unique (historical SID duplicates possible). Unique+sparse requires a data cleanup migration.
     await db.messages.create_index("twilio_sid")
+    await db.messages.create_index(
+        [("provider", 1), ("provider_message_id", 1)],
+        unique=True,
+        partialFilterExpression={
+            "provider": {"$type": "string"},
+            "provider_message_id": {"$type": "string"},
+        },
+    )
     await db.agents.create_index([("user_id", 1), ("created_at", -1)])
     await db.campaigns.create_index([("user_id", 1), ("created_at", -1)])
     await db.campaigns.create_index([("status", 1), ("scheduled_at", 1)])
@@ -132,6 +147,7 @@ async def init_indexes() -> None:
     await db.campaign_recipients.create_index([("campaign_id", 1), ("phone", 1)], unique=True)
     await db.campaign_recipients.create_index("message_id", sparse=True)
     await db.campaign_recipients.create_index("twilio_sid", sparse=True)
+    await db.campaign_recipients.create_index("provider_message_id", sparse=True)
     await db.campaign_recipients.create_index([("campaign_id", 1), ("ai_generation_status", 1)])
     await db.campaign_recipients.create_index([("campaign_id", 1), ("ai_approved", 1)])
     await db.campaign_recipients.create_index([("campaign_id", 1), ("content_source", 1)])
@@ -146,13 +162,31 @@ async def init_indexes() -> None:
     await db.blast_campaigns.create_index([("user_id", 1), ("created_at", -1)])
     await db.blast_recipients.create_index([("blast_id", 1)])
     await db.blast_recipients.create_index("twilio_sid", sparse=True)
+    await db.blast_recipients.create_index("provider_message_id", sparse=True)
     await db.blacklist.create_index([("user_id", 1), ("phone", 1)], unique=True)
     await db.webhook_events.create_index("twilio_sid", unique=True, sparse=True)
+    await db.webhook_events.create_index(
+        [("provider", 1), ("provider_message_id", 1)],
+        unique=True,
+        partialFilterExpression={
+            "provider": {"$type": "string"},
+            "provider_message_id": {"$type": "string"},
+        },
+    )
     # Idempotency SIDs only need short retention; TTL prevents unbounded growth (D7).
     await db.webhook_events.create_index("received_at", expireAfterSeconds=60 * 60 * 24 * 30)
     await db.templates.create_index([("user_id", 1), ("updated_at", -1)])
     await db.templates.create_index([("user_id", 1), ("name", 1)])
     await db.templates.create_index([("user_id", 1), ("content_sid", 1)])
+    await db.templates.create_index(
+        [("user_id", 1), ("provider", 1), ("meta_template_name", 1), ("meta_language_code", 1)],
+        unique=True,
+        partialFilterExpression={
+            "provider": "meta",
+            "meta_template_name": {"$type": "string"},
+            "meta_language_code": {"$type": "string"},
+        },
+    )
     await db.consent_events.create_index([("user_id", 1), ("lead_id", 1), ("created_at", -1)])
     await db.messages.create_index(
         [("user_id", 1), ("idempotency_key", 1)],

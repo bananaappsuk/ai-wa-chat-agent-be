@@ -42,6 +42,12 @@ def _sender_ok() -> bool:
     return has_creds and (has_from or has_ms)
 
 
+def _meta_sender_ok(user: Optional[dict] = None) -> bool:
+    from app.services.meta_credentials import tenant_meta_ready
+
+    return tenant_meta_ready(user)
+
+
 def _window_status(lead: Optional[dict]) -> str:
     if not lead:
         return "unknown"
@@ -60,6 +66,8 @@ def get_whatsapp_send_eligibility(
     has_template: bool = False,
     has_media: bool = False,
     blacklisted: Optional[bool] = None,
+    provider: Optional[str] = None,
+    user: Optional[dict] = None,
 ) -> EligibilityResult:
     """Reusable eligibility check for UI preview and send paths."""
     lead = apply_consent_defaults(dict(lead or {}))
@@ -67,7 +75,11 @@ def get_whatsapp_send_eligibility(
     is_bl = bool(lead.get("blacklisted")) if blacklisted is None else bool(blacklisted)
     phone_val = (phone or lead.get("phone") or "").strip()
     window = _window_status(lead)
-    sender = _sender_ok()
+    prov = (provider or "twilio").strip().lower()
+    if prov == "meta":
+        sender = _meta_sender_ok(user)
+    else:
+        sender = _sender_ok()
 
     if not sender:
         return EligibilityResult(
@@ -161,6 +173,27 @@ def get_whatsapp_send_eligibility(
             sender_configured=True,
         )
     if window != "open":
+        if prov == "meta":
+            if has_template:
+                return EligibilityResult(
+                    True,
+                    "ok",
+                    "Allowed",
+                    consent,
+                    window,
+                    "clear",
+                    sender_configured=True,
+                )
+            return EligibilityResult(
+                False,
+                "window_closed",
+                "Use an approved Meta WhatsApp template to message outside the 24-hour window.",
+                consent,
+                window,
+                "clear",
+                template_required=True,
+                sender_configured=True,
+            )
         return EligibilityResult(
             False,
             "window_closed",
