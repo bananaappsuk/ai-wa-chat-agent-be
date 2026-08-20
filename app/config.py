@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     # Meta Cloud API POC is additive; set to "meta" only for explicit Meta experiments.
     WHATSAPP_PROVIDER: str = "twilio"
 
-    # Meta WhatsApp Cloud API (POC) — secrets stay server-side only; never expose to FE.
+    # Legacy dev/test only — never production Graph send/routing authority.
     META_ACCESS_TOKEN: str = ""
     META_PHONE_NUMBER_ID: str = ""
     META_WABA_ID: str = ""
@@ -328,16 +328,11 @@ class Settings(BaseSettings):
         return raw if raw in ("twilio", "meta") else "twilio"
 
     @property
-    def meta_configured(self) -> bool:
-        return bool(
-            (self.META_ACCESS_TOKEN or "").strip()
-            and (self.META_PHONE_NUMBER_ID or "").strip()
-        )
-
-    @property
     def embedded_signup_available(self) -> bool:
+        """True only when the API can complete Embedded Signup (secret stays server-side)."""
         return bool(
             (self.META_APP_ID or "").strip()
+            and (self.META_APP_SECRET or "").strip()
             and (self.META_EMBEDDED_SIGNUP_CONFIG_ID or "").strip()
         )
 
@@ -449,16 +444,26 @@ class Settings(BaseSettings):
                 )
             elif enc == (self.JWT_SECRET or "").strip():
                 errors.append("META_TOKEN_ENCRYPTION_KEY must not equal JWT_SECRET")
+            else:
+                try:
+                    from app.services.meta_credentials import MetaCredentialsError, load_encryption_key
 
-            if (self.META_EMBEDDED_SIGNUP_CONFIG_ID or "").strip():
-                if not (self.META_APP_ID or "").strip():
-                    errors.append(
-                        "META_APP_ID is required when META_EMBEDDED_SIGNUP_CONFIG_ID is set"
-                    )
-                if not (self.META_APP_SECRET or "").strip():
-                    errors.append(
-                        "META_APP_SECRET is required when META_EMBEDDED_SIGNUP_CONFIG_ID is set"
-                    )
+                    load_encryption_key(enc)
+                except MetaCredentialsError as exc:
+                    errors.append(str(exc))
+
+            if not (self.META_APP_ID or "").strip():
+                errors.append(
+                    f"META_APP_ID is required when APP_ENV={self.app_env}"
+                )
+            if not (self.META_APP_SECRET or "").strip():
+                errors.append(
+                    f"META_APP_SECRET is required when APP_ENV={self.app_env}"
+                )
+            if not (self.META_WEBHOOK_VERIFY_TOKEN or "").strip():
+                errors.append(
+                    f"META_WEBHOOK_VERIFY_TOKEN is required when APP_ENV={self.app_env}"
+                )
 
             if self.AI_FEATURES_ENABLED and not (self.OPENAI_API_KEY or "").strip():
                 errors.append("OPENAI_API_KEY is required when AI_FEATURES_ENABLED=true")

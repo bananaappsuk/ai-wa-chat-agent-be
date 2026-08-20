@@ -6,11 +6,12 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from bson import ObjectId
 from pymongo import MongoClient
 
 from app.config import settings
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 ALG_AESGCM = "AESGCM"
 KEY_ID_DEFAULT = "v1"
 CONNECTED_STATUSES = frozenset({"connected", "legacy_poc"})
+_AUTH_DEATH_CODES = frozenset({190, 102, 463, 467, "190", "102", "463", "467"})
 
 _sync_client: MongoClient | None = None
 
@@ -49,7 +51,10 @@ def load_encryption_key(raw: Optional[str] = None) -> bytes:
     if jwt and text == jwt:
         raise MetaCredentialsError("META_TOKEN_ENCRYPTION_KEY must not equal JWT_SECRET")
     if text.startswith("base64:"):
-        blob = base64.urlsafe_b64decode(text[7:] + "==")
+        try:
+            blob = base64.urlsafe_b64decode(text[7:] + "==")
+        except Exception as exc:
+            raise MetaCredentialsError("META_TOKEN_ENCRYPTION_KEY is not valid base64") from exc
     else:
         try:
             blob = base64.urlsafe_b64decode(text + "==")
@@ -91,6 +96,73 @@ def decrypt_secret(ciphertext: str, *, key: Optional[bytes] = None) -> str:
         raise MetaCredentialsError("Ciphertext authentication failed") from exc
     except Exception as exc:
         raise MetaCredentialsError("Decrypt failed") from exc
+
+
+def _as_utc(val: Any) -> Optional[datetime]:
+    if val is None:
+        return None
+    if isinstance(val, str):
+        try:
+            val = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(val, datetime):
+        return None
+    if val.tzinfo is None:
+        return val.replace(tzinfo=timezone.utc)
+    return val.astimezone(timezone.utc)
+
+
+def _credential_expired(row: Optional[dict]) -> bool:
+    if not row:
+        return False
+    exp = _as_utc(row.get("expires_at"))
+    if exp is None:
+        return False
+    return exp <= utcnow()
+
+
+def is_meta_auth_death(*, http_status: Optional[int] = None, error: Any = None) -> bool:
+    """True only for genuine token/OAuth death — not 429, 5xx, or messaging 131xxx."""
+    if http_status == 429:
+        return False
+    if http_status is not None and int(http_status) >= 500:
+        return False
+    if http_status == 401:
+        return True
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    if code in _AUTH_DEATH_CODES:
+        return True
+    return False
+
+
+def maybe_mark_meta_auth_death(
+    user: Optional[dict],
+    *,
+    http_status: Optional[int] = None,
+    error: Any = None,
+    db=None,
+) -> bool:
+    """Best-effort: set connection_status=error. Keeps PNID/WABA/credential row."""
+    if not is_meta_auth_death(http_status=http_status, error=error):
+        return False
+    uid = _user_id(user)
+    if not uid:
+        return False
+    try:
+        oid: Any = ObjectId(uid) if ObjectId.is_valid(uid) else uid
+        users = (db if db is not None else _sync_db()).users
+        users.update_one(
+            {"_id": oid},
+            {"$set": {"meta_connection_status": "error", "updated_at": utcnow()}},
+        )
+        logger.warning("meta_auth_death marked connection error user_id=%s", uid)
+        return True
+    except Exception:
+        logger.warning("meta_auth_death mark failed user_id=%s", uid)
+        return False
 
 
 def _user_id(user: Optional[dict]) -> str:
@@ -267,6 +339,8 @@ def _load_encrypted(user: dict, *, expected_pnid: str, db=None) -> dict[str, str
     row = _coll(db).find_one({"user_id": uid})
     if not row:
         raise MetaCredentialsError("Meta credentials are not configured for this account")
+    if _credential_expired(row):
+        raise MetaCredentialsError("Meta credentials have expired")
     payload = decrypt_secret(str(row.get("ciphertext") or ""))
     try:
         data = json.loads(payload)

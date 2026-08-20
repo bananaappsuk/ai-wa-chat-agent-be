@@ -203,6 +203,9 @@ def send_text(
             to_digits,
             (msg or "")[:200],
         )
+        from app.services.meta_credentials import maybe_mark_meta_auth_death
+
+        maybe_mark_meta_auth_death(user, http_status=resp.status_code, error=err)
         raise MetaWhatsAppError(msg, status_code=resp.status_code, details=err or data)
 
     message_id = None
@@ -315,6 +318,9 @@ def send_template(
             to_digits,
             (msg or "")[:200],
         )
+        from app.services.meta_credentials import maybe_mark_meta_auth_death
+
+        maybe_mark_meta_auth_death(user, http_status=resp.status_code, error=err)
         raise MetaWhatsAppError(msg, status_code=resp.status_code, details=err or data)
 
     message_id = None

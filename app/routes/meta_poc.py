@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.middleware.auth import current_user
 from app.services import meta_whatsapp_service
 from app.services.meta_whatsapp_service import MetaWhatsAppError
@@ -25,10 +26,12 @@ async def meta_test_send(
     user: dict = Depends(current_user),
 ) -> dict:
     """
-    Phase 1 POC: send one text message via Meta Cloud API (no RQ).
+    Dev/test diagnostic only. Staging/production return 404.
 
-    Requires JWT. Does not expose Meta secrets. Does not touch Twilio pipelines.
+    Requires JWT. Uses the tenant credential resolver. Does not expose Meta secrets.
     """
+    if settings.is_production_like:
+        raise HTTPException(status_code=404, detail="Not found")
     user_id = str(user.get("_id") or "")
     logger.info("meta_test_send requested user_id=%s to=%s text_len=%s", user_id, body.to, len(body.message))
     try:

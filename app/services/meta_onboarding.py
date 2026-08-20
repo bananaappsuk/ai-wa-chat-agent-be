@@ -65,13 +65,13 @@ def embedded_signup_available() -> bool:
 
 
 def start_onboarding_session(*, user_id: str) -> dict[str, str]:
-    app_id = (settings.META_APP_ID or "").strip()
-    config_id = (settings.META_EMBEDDED_SIGNUP_CONFIG_ID or "").strip()
-    if not app_id or not config_id:
+    if not embedded_signup_available():
         raise HTTPException(
             status_code=400,
             detail="Meta Embedded Signup is not configured",
         )
+    app_id = (settings.META_APP_ID or "").strip()
+    config_id = (settings.META_EMBEDDED_SIGNUP_CONFIG_ID or "").strip()
     uid = str(user_id or "").strip()
     if not uid:
         raise HTTPException(status_code=400, detail="Invalid account")
@@ -130,6 +130,8 @@ def _mark_consumed(state: str, data: dict[str, Any]) -> None:
 
 
 def _acquire_inflight(state: str) -> None:
+    # 90s TTL lock. Do not DEL on success: without an ownership token, DEL could
+    # remove a later request's lock after TTL expiry. Failures still release.
     ok = _redis().set(f"{INFLIGHT_PREFIX}{state}", "1", nx=True, ex=90)
     if not ok:
         raise HTTPException(status_code=409, detail="Onboarding is already in progress")
@@ -266,9 +268,7 @@ def verify_waba_and_phone(*, access_token: str, waba_id: str, phone_number_id: s
 def subscribe_waba(*, access_token: str, waba_id: str) -> bool:
     result = _graph_post(f"{waba_id}/subscribed_apps", token=access_token)
     data = result.get("data") or {}
-    if result.get("ok") and (data.get("success") is True or data.get("success") == "true"):
-        return True
-    if result.get("ok") and not data.get("error"):
+    if data.get("success") is True or data.get("success") == "true":
         return True
     logger.warning("meta_onboarding subscribed_apps failed status=%s", result.get("status_code"))
     return False
@@ -286,7 +286,7 @@ def register_phone_number(*, access_token: str, phone_number_id: str) -> tuple[b
         json_body={"messaging_product": "whatsapp"},
     )
     data = result.get("data") or {}
-    if result.get("ok") and (data.get("success") is True or not data.get("error")):
+    if data.get("success") is True or data.get("success") == "true":
         return True, None
     err = data.get("error") if isinstance(data.get("error"), dict) else {}
     code = str(err.get("code") or "").strip()
@@ -375,6 +375,9 @@ async def complete_onboarding(
         biz = validate_graph_id(business_id, field="business_id") if business_id else None
         if biz:
             set_doc["meta_business_id"] = biz
+        previous_pnid = str(user.get("meta_phone_number_id") or "").strip()
+        if previous_pnid and previous_pnid != pnid:
+            set_doc["meta_last_phone_number_id"] = previous_pnid
         try:
             await db.users.update_one({"_id": ObjectId(uid)}, {"$set": set_doc})
         except DuplicateKeyError as exc:
@@ -382,6 +385,13 @@ async def complete_onboarding(
             raise HTTPException(
                 status_code=409,
                 detail="That WhatsApp number is already linked",
+            ) from exc
+        except Exception as exc:
+            restore_credentials_snapshot(user_id=uid, snapshot=previous_cred, db=cred_db)
+            logger.exception("meta_onboarding user binding update failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Could not complete Meta onboarding",
             ) from exc
 
         _mark_consumed(state, session)

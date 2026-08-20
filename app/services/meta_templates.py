@@ -339,6 +339,9 @@ async def fetch_graph_message_templates(user: dict) -> list[dict[str, Any]]:
                 if isinstance(err, dict):
                     msg = str(err.get("message") or msg)[:200]
                 logger.warning("meta_template_list failed status=%s", resp.status_code)
+                from app.services.meta_credentials import maybe_mark_meta_auth_death
+
+                maybe_mark_meta_auth_death(user, http_status=resp.status_code, error=err)
                 raise HTTPException(status_code=502, detail=msg)
             for row in data.get("data") or []:
                 if isinstance(row, dict):

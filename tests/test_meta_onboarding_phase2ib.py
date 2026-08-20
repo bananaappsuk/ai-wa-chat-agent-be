@@ -615,6 +615,7 @@ async def test_reconnect_same_and_new_pnid():
         assert payload2["p"] == PN_B
     assert result2["ok"] is True
     assert mem.users.docs[0]["meta_phone_number_id"] == PN_B
+    assert mem.users.docs[0]["meta_last_phone_number_id"] == PN_A
 
 
 @pytest.mark.asyncio

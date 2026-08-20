@@ -82,6 +82,7 @@ async def fetch_graph_media_metadata(
     *,
     client: httpx.AsyncClient,
     access_token: str,
+    user: Optional[dict] = None,
 ) -> dict[str, Any]:
     mid = (media_id or "").strip()
     if not mid or "/" in mid or "?" in mid or ".." in mid:
@@ -93,6 +94,10 @@ async def fetch_graph_media_metadata(
     except Exception:
         data = {}
     if resp.is_error or not isinstance(data, dict):
+        err = data.get("error") if isinstance(data, dict) else None
+        from app.services.meta_credentials import maybe_mark_meta_auth_death
+
+        maybe_mark_meta_auth_death(user, http_status=getattr(resp, "status_code", None), error=err)
         raise MetaMediaError("Meta media metadata request failed")
     tmp = str(data.get("url") or "").strip()
     if not tmp:
@@ -179,7 +184,9 @@ async def download_and_store_meta_media(
     timeout = httpx.Timeout(_timeout())
     http = client or httpx.AsyncClient(timeout=timeout, follow_redirects=False)
     try:
-        meta = await fetch_graph_media_metadata(media_id, client=http, access_token=token)
+        meta = await fetch_graph_media_metadata(
+            media_id, client=http, access_token=token, user=user
+        )
         try:
             size_hint = int(meta.get("file_size") or 0)
         except (TypeError, ValueError):

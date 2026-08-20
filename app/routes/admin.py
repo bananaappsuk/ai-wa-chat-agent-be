@@ -19,6 +19,7 @@ from app.security.audit import audit
 from app.security.permissions import require_permission
 from app.security.validation import require_object_id, validate_password_complexity
 from app.services.activity import record_activity
+from app.services.meta_credentials import delete_credentials_for_user
 from app.services.password_reset import issue_reset_token
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -488,6 +489,7 @@ async def delete_user(uid: str, admin: dict = Depends(current_admin)) -> Respons
         async for doc in db.blast_campaigns.find({"user_id": uid}, {"_id": 1})
     ]
     await db.users.delete_one({"_id": ObjectId(uid)})
+    delete_credentials_for_user(user_id=uid)
     await db.leads.delete_many({"user_id": uid})
     await db.messages.delete_many({"user_id": uid})
     await db.agents.delete_many({"user_id": uid})
