@@ -72,13 +72,20 @@ async def run_bulk_action(
         try:
             if action == "assign_agent":
                 agent_id = str(value or "").strip()
-                if not agent_id or len(agent_id) > 64:
+                if agent_id in ("", "auto", "none"):
+                    # Clear assignment → conversation is auto-routed again.
+                    await db.leads.update_one(
+                        {"_id": oid, "user_id": user_id},
+                        {"$set": {"updated_at": now}, "$unset": {"assigned_agent_id": ""}},
+                    )
+                elif len(agent_id) > 64:
                     failed += 1
                     continue
-                await db.leads.update_one(
-                    {"_id": oid, "user_id": user_id},
-                    {"$set": {"assigned_agent_id": agent_id, "updated_at": now}},
-                )
+                else:
+                    await db.leads.update_one(
+                        {"_id": oid, "user_id": user_id},
+                        {"$set": {"assigned_agent_id": agent_id, "updated_at": now}},
+                    )
             elif action == "pause_ai":
                 await db.leads.update_one(
                     {"_id": oid, "user_id": user_id},

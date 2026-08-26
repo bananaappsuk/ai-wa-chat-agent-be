@@ -174,7 +174,7 @@ async def test_outbound_media_passed_to_twilio_and_media_only_accepted():
                 media_content_type="image/jpeg",
                 media_filename="x.jpg",
             ),
-            user={"_id": user_id},
+            user={"_id": user_id, "plan": "business", "subscription_status": "active"},
         )
 
     assert result["status"] == "queued"

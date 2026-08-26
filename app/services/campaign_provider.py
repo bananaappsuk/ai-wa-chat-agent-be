@@ -70,7 +70,6 @@ async def resolve_campaign_template(
     Returns provider twilio|meta plus Twilio content_sid or Meta Graph identity.
     """
     tid = (template_id or "").strip() or None
-    mode = (content_mode or "template").strip().lower() or "template"
     empty = {
         "provider": "twilio",
         "template_id": None,
@@ -84,11 +83,9 @@ async def resolve_campaign_template(
     peek = await peek_template(user_id, tid)
     is_meta = (peek.get("provider") or "") == "meta"
 
-    if mode == "ai_agent" and is_meta:
-        raise HTTPException(
-            status_code=400,
-            detail="AI Agent campaigns cannot use Meta WhatsApp templates in this version.",
-        )
+    # AI Agent campaigns on Meta: the AI personalises the approved template's declared
+    # variables (Meta forbids free-form business-initiated sends, so template-variable
+    # generation is the supported path). Media on Meta campaigns is still unsupported.
 
     if is_meta:
         if (media_url or "").strip():

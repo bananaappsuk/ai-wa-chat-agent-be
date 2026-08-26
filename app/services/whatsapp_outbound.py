@@ -42,6 +42,38 @@ def send_whatsapp_text(
     raise UnknownWhatsAppProviderError(f"Unknown WhatsApp provider: {prov or '(empty)'}")
 
 
+def send_whatsapp_media(
+    *,
+    provider: str,
+    to: str,
+    media_url: str,
+    media_type: str,
+    caption: Optional[str] = None,
+    filename: Optional[str] = None,
+    user: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Send a media message. Meta uses a public link (Graph fetches it). Twilio media
+    stays on the native worker path (twilio_service.send_whatsapp(media_url=...))."""
+    prov = (provider or "").strip().lower()
+    if prov == "meta":
+        result = meta_whatsapp_service.send_media(
+            to=to,
+            media_url=media_url,
+            media_type=media_type,
+            caption=caption,
+            filename=filename,
+            user=user,
+        )
+        return {
+            "provider": "meta",
+            "provider_message_id": result.provider_message_id,
+            "status": "sent",
+        }
+    raise UnknownWhatsAppProviderError(
+        f"Media send is not implemented for provider: {prov or '(empty)'}"
+    )
+
+
 def send_whatsapp_template(
     *,
     provider: str,
@@ -73,6 +105,7 @@ def send_whatsapp_template(
 
 __all__ = [
     "send_whatsapp_text",
+    "send_whatsapp_media",
     "send_whatsapp_template",
     "UnknownWhatsAppProviderError",
     "MetaWhatsAppError",

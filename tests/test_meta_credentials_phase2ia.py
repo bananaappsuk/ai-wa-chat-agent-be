@@ -232,7 +232,11 @@ def test_settings_response_has_no_token():
         "twilio_whatsapp_to": "+447700900001",
     }
     db = SyncDB()
-    with _key_ctx():
+    from app.config import settings as _settings
+
+    with _key_ctx(), patch.object(_settings, "META_APP_ID", ""):
+        # Force embedded-signup "not configured" deterministically (ambient .env may
+        # now carry real Meta app creds).
         upsert_encrypted_access_token(user_id=str(user["_id"]), access_token=TOKEN_A, phone_number_id=PN_A, db=db)
         with patch("app.services.meta_credentials.tenant_meta_ready", return_value=True):
             out = build_whatsapp_settings(user)

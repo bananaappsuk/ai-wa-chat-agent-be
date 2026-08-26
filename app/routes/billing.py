@@ -25,6 +25,11 @@ from app.db.mongo import get_db
 from app.middleware.auth import current_user
 from app.models.common import utcnow
 from app.services import stripe_service
+from app.services.entitlements import (
+    effective_entitlements,
+    effective_plan_key,
+    usage_snapshot,
+)
 from app.services.stripe_service import StripeNotConfiguredError
 
 logger = logging.getLogger(__name__)
@@ -123,6 +128,8 @@ async def get_subscription(user: dict = Depends(current_user)) -> dict[str, Any]
         "last_payment_status": user.get("last_payment_status"),
         "last_payment_at": _iso(user.get("last_payment_at")),
         "entitlements": entitlements_for_plan(plan),
+        "effective_plan": effective_plan_key(user),
+        "effective_entitlements": effective_entitlements(user),
         "has_active_subscription": status in ACTIVE_SUBSCRIPTION_STATUSES
         and bool(user.get("stripe_subscription_id")),
         "can_checkout": plan == "free"
@@ -134,6 +141,14 @@ async def get_subscription(user: dict = Depends(current_user)) -> dict[str, Any]
             and status in ACTIVE_SUBSCRIPTION_STATUSES | {"unpaid", "past_due"}
         ),
     }
+
+
+@router.get("/usage")
+async def get_usage(user: dict = Depends(current_user)) -> dict[str, Any]:
+    """Current usage vs the tenant's effective plan limits (for upgrade prompts)."""
+    from app.workers.queue import get_redis
+
+    return await usage_snapshot(get_db(), get_redis(), user)
 
 
 @router.get("/invoices")

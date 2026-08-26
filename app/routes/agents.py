@@ -72,11 +72,22 @@ async def extract_knowledge(
 
 @router.post("", status_code=201)
 async def create_agent(payload: AgentCreate, user: dict = Depends(current_user)) -> dict:
+    from app.services.entitlements import require_capacity
+
+    user_id = str(user["_id"])
+    db = get_db()
+    existing = await db.agents.count_documents({"user_id": user_id})
+    require_capacity(user, "ai_agents", existing, label="AI agents")
     doc = payload.model_dump()
-    doc["user_id"] = str(user["_id"])
+    doc["user_id"] = user_id
     doc["created_at"] = utcnow()
     doc["updated_at"] = utcnow()
-    res = await get_db().agents.insert_one(doc)
+    if doc.get("is_default"):
+        # Only one default agent per tenant.
+        await db.agents.update_many(
+            {"user_id": user_id, "is_default": True}, {"$set": {"is_default": False}}
+        )
+    res = await db.agents.insert_one(doc)
     doc["_id"] = res.inserted_id
     return serialize(doc)
 
@@ -85,10 +96,17 @@ async def create_agent(payload: AgentCreate, user: dict = Depends(current_user))
 async def update_agent(agent_id: str, payload: AgentUpdate, user: dict = Depends(current_user)) -> dict:
     if not ObjectId.is_valid(agent_id):
         raise HTTPException(status_code=404, detail="Not found")
+    user_id = str(user["_id"])
+    db = get_db()
     update = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
     update["updated_at"] = utcnow()
-    res = await get_db().agents.update_one(
-        {"_id": ObjectId(agent_id), "user_id": str(user["_id"])}, {"$set": update}
+    if update.get("is_default"):
+        await db.agents.update_many(
+            {"user_id": user_id, "is_default": True, "_id": {"$ne": ObjectId(agent_id)}},
+            {"$set": {"is_default": False}},
+        )
+    res = await db.agents.update_one(
+        {"_id": ObjectId(agent_id), "user_id": user_id}, {"$set": update}
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Not found")

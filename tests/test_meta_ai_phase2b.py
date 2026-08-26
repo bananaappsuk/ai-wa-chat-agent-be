@@ -214,7 +214,7 @@ def test_worker_uses_trigger_provider_not_latest_inbound():
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=_open_lead(user_id, lead_id))
     db.users.find_one = MagicMock(
-        return_value={"_id": ObjectId(user_id), "meta_phone_number_id": "PN_A"}
+        return_value={"_id": ObjectId(user_id), "meta_phone_number_id": "PN_A", "plan": "business", "subscription_status": "active"}
     )
     db.agents.find_one = MagicMock(return_value={"_id": ObjectId(), "name": "Agent"})
     db.messages.count_documents = MagicMock(return_value=3)
@@ -266,7 +266,7 @@ def test_graph_hard_failure_marks_failed_no_twilio_fallback():
     outbound_id = ObjectId()
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=_open_lead(user_id, lead_id))
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.agents.find_one = MagicMock(return_value=None)
     db.messages.count_documents = MagicMock(return_value=2)
     db.messages.insert_one = MagicMock(return_value=SimpleNamespace(inserted_id=outbound_id))
@@ -309,7 +309,7 @@ def test_ai_pause_and_takeover_prevent_send():
     }
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=_open_lead(user_id, lead_id, ai_paused=True))
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.messages.find_one = MagicMock(return_value=trigger)
     result = _run_ai_job(
         db, user_id, lead_id, provider="meta", trigger_message_id=str(trigger_id)
@@ -338,7 +338,7 @@ def test_opted_out_and_blacklist_prevent_meta_send():
         "message": "hi",
     }
     db = MagicMock()
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.messages.find_one = MagicMock(return_value=trigger)
     db.agents.find_one = MagicMock(return_value=None)
 
@@ -396,7 +396,7 @@ def test_closed_window_prevents_meta_freeform_and_twilio_template():
     )
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=lead)
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.messages.find_one = MagicMock(
         return_value={
             "_id": trigger_id,
@@ -432,7 +432,7 @@ def test_legacy_two_arg_twilio_job_still_calls_twilio_not_meta():
     outbound_id = ObjectId()
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=_open_lead(user_id, lead_id))
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.agents.find_one = MagicMock(return_value=None)
     db.messages.find_one = MagicMock(return_value={"message": "hi", "direction": "inbound"})
     db.messages.count_documents = MagicMock(return_value=2)
@@ -458,7 +458,7 @@ def test_new_twilio_job_never_calls_meta():
     outbound_id = ObjectId()
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=_open_lead(user_id, lead_id))
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.agents.find_one = MagicMock(return_value=None)
     db.messages.count_documents = MagicMock(return_value=2)
     db.messages.insert_one = MagicMock(return_value=SimpleNamespace(inserted_id=outbound_id))
@@ -494,7 +494,7 @@ def test_same_trigger_does_not_double_send():
     trigger_id = ObjectId()
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=_open_lead(user_id, lead_id))
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.messages.find_one = MagicMock(
         return_value={
             "_id": trigger_id,
@@ -522,7 +522,7 @@ def test_provider_conflict_and_unknown_provider_fail_safe():
     trigger_id = ObjectId()
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=_open_lead(user_id, lead_id))
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.messages.find_one = MagicMock(
         return_value={
             "_id": trigger_id,
@@ -564,7 +564,7 @@ def test_meta_retry_path_stays_on_meta():
     )
     db.leads.find_one = MagicMock(return_value=_open_lead(user_id, ObjectId(lead_id)))
     db.users.find_one = MagicMock(
-        return_value={"_id": ObjectId(user_id), "meta_phone_number_id": "PN_A"}
+        return_value={"_id": ObjectId(user_id), "meta_phone_number_id": "PN_A", "plan": "business", "subscription_status": "active"}
     )
     db.messages.update_one = MagicMock()
     with (
@@ -655,7 +655,7 @@ def test_whatsapp_provider_env_is_not_used_for_legacy_twilio_job(monkeypatch):
     outbound_id = ObjectId()
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=_open_lead(user_id, lead_id))
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.agents.find_one = MagicMock(return_value=None)
     db.messages.find_one = MagicMock(return_value={"message": "hi", "direction": "inbound"})
     db.messages.count_documents = MagicMock(return_value=2)

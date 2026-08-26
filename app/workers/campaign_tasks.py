@@ -364,6 +364,13 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
         if not lead:
             lead = db.leads.find_one({"user_id": user_id, "phone": _norm_phone(phone)})
 
+        # Sticky routing: a reply to this campaign should be handled by the campaign's
+        # agent (AI campaigns carry agent_id), not re-routed to a keyword match / generic.
+        camp_agent_id = str(campaign.get("agent_id") or "").strip()
+        if lead and camp_agent_id and str(lead.get("assigned_agent_id") or "") != camp_agent_id:
+            db.leads.update_one({"_id": lead["_id"]}, {"$set": {"assigned_agent_id": camp_agent_id}})
+            lead["assigned_agent_id"] = camp_agent_id
+
         content_sid = campaign.get("content_sid")
         template_id = campaign.get("template_id")
         has_template = bool(content_sid or template_id or campaign.get("fallback_template_content_sid") or campaign.get("fallback_template_id"))
@@ -554,8 +561,10 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                 from app.services.meta_templates import MetaTemplateError, build_graph_components, is_meta_template_sendable
                 from app.services.whatsapp_outbound import send_whatsapp_template
 
-                if ai_mode:
-                    raise RuntimeError("AI Agent campaigns cannot use Meta WhatsApp templates in this version.")
+                # AI Agent campaigns are allowed on Meta: `content_variables` already holds
+                # the AI-personalised template variables (computed above for the
+                # ai_template_variables path); build_graph_components fills the approved
+                # Meta template with them.
                 tid = campaign.get("template_id")
                 tmpl = None
                 if tid and ObjectId.is_valid(str(tid)):

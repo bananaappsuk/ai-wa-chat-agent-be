@@ -66,7 +66,7 @@ def _create_db(user_id: ObjectId, tmpl=None, camp_oid=None):
     db = MagicMock()
     if tmpl is not None:
         db.templates.find_one = AsyncMock(return_value=tmpl)
-    db.users.find_one = AsyncMock(return_value={"_id": user_id, "meta_phone_number_id": PNID})
+    db.users.find_one = AsyncMock(return_value={"_id": user_id, "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"})
     db.campaigns.insert_one = AsyncMock(return_value=SimpleNamespace(inserted_id=camp_oid))
     db.campaigns.update_one = AsyncMock()
     db.campaigns.delete_one = AsyncMock()
@@ -105,7 +105,7 @@ async def test_meta_campaign_requires_sendable_and_stores_provider():
                 recipients=["+447700900000"],
                 content_mode="template",
             ),
-            user={"_id": user_id, "meta_phone_number_id": PNID},
+            user={"_id": user_id, "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"},
         )
     inserted = db.campaigns.insert_one.await_args.args[0]
     assert inserted["provider"] == "meta"
@@ -127,7 +127,7 @@ async def test_campaign_without_template_is_twilio():
     ):
         await camp_routes.create_campaign(
             CampaignCreate(name="T", message="hello", recipients=["+447700900000"]),
-            user={"_id": user_id},
+            user={"_id": user_id, "plan": "business", "subscription_status": "active"},
         )
     assert db.campaigns.insert_one.await_args.args[0]["provider"] == "twilio"
 
@@ -153,7 +153,7 @@ async def test_start_meta_without_template_rejected():
     ):
         await camp_routes.start_campaign(
             str(ObjectId()),
-            user={"_id": user_id, "meta_phone_number_id": PNID},
+            user={"_id": user_id, "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"},
             confirm_marketing=True,
         )
     assert exc.value.status_code == 400
@@ -161,31 +161,27 @@ async def test_start_meta_without_template_rejected():
 
 
 @pytest.mark.asyncio
-async def test_meta_ai_campaign_rejected():
-    user_id = ObjectId()
-    tmpl = _approved_meta_tmpl(str(user_id))
-    db, _ = _create_db(user_id, tmpl)
+async def test_meta_ai_campaign_allowed_resolves_meta_provider():
+    # AI Agent campaigns on Meta are now supported (AI personalises the approved
+    # template's variables). The resolver must return provider "meta", not reject.
+    from unittest.mock import AsyncMock
+
+    from app.services import campaign_provider as cp
+
+    tmpl = {"_id": ObjectId(), "meta_template_name": "promo", "meta_language_code": "en"}
     with (
-        patch.object(camp_routes, "get_db", return_value=db),
-        patch("app.routes.templates.get_db", return_value=db),
-        patch("app.services.campaign_provider.get_db", return_value=db),
-        patch("app.security.rate_limit.rate_limit_campaign"),
-        pytest.raises(HTTPException) as exc,
+        patch.object(cp, "peek_template", new=AsyncMock(return_value={"provider": "meta"})),
+        patch("app.routes.templates.get_sendable_meta_template", new=AsyncMock(return_value=tmpl)),
     ):
-        await camp_routes.create_campaign(
-            CampaignCreate(
-                name="AI",
-                content_mode="ai_agent",
-                agent_id=str(ObjectId()),
-                campaign_goal="Sell AI Summer Camp Essentials 2026",
-                template_id=str(tmpl["_id"]),
-                fallback_template_id=str(tmpl["_id"]),
-                recipients=["+447700900000"],
-            ),
-            user={"_id": user_id, "meta_phone_number_id": PNID},
+        resolved = await cp.resolve_campaign_template(
+            user_id=str(ObjectId()),
+            template_id=str(tmpl["_id"]),
+            media_url=None,
+            content_mode="ai_agent",
         )
-    assert exc.value.status_code == 400
-    assert "AI Agent" in str(exc.value.detail)
+    assert resolved["provider"] == "meta"
+    assert resolved["meta_template_name"] == "promo"
+    assert resolved["content_sid"] is None
 
 
 def test_meta_media_campaign_rejected_at_model_and_resolver():
@@ -311,7 +307,7 @@ def test_campaign_worker_meta_graph_not_twilio():
     )
     db.leads.find_one = MagicMock(return_value=_opted_lead(user_id))
     db.templates.find_one = MagicMock(return_value=tmpl)
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"})
     db.messages.insert_one = MagicMock(return_value=SimpleNamespace(inserted_id=ObjectId()))
     db.campaign_recipients.aggregate = MagicMock(return_value=[])
     patches = _meta_worker_patches(db)
@@ -397,7 +393,7 @@ def test_campaign_worker_meta_429_retries_meta_only():
     db.campaign_recipients.find_one_and_update = MagicMock(side_effect=[recipient, {**recipient, "status": "retrying"}])
     db.leads.find_one = MagicMock(return_value=_opted_lead(user_id))
     db.templates.find_one = MagicMock(return_value=tmpl)
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"})
     q = MagicMock()
     patches = list(_meta_worker_patches(db, send_side=MetaWhatsAppError("rate", status_code=429)))
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8] as twilio, patches[9], patches[10], patches[11], patch.object(ct, "_queue", return_value=q):
@@ -439,7 +435,7 @@ def test_campaign_worker_meta_hard_4xx_fails():
     )
     db.leads.find_one = MagicMock(return_value=_opted_lead(user_id))
     db.templates.find_one = MagicMock(return_value=tmpl)
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"})
     patches = list(_meta_worker_patches(db, send_side=MetaWhatsAppError("bad template", status_code=400)))
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8] as twilio, patches[9], patches[10], patches[11]:
         ct.send_campaign_recipient(user_id, campaign_id, str(recipient_id))
@@ -525,7 +521,7 @@ async def test_meta_blast_requires_template_rejects_freeform_media():
     tmpl = _approved_meta_tmpl(str(user_id))
     db = MagicMock()
     db.templates.find_one = AsyncMock(return_value=tmpl)
-    db.users.find_one = AsyncMock(return_value={"_id": user_id, "meta_phone_number_id": PNID})
+    db.users.find_one = AsyncMock(return_value={"_id": user_id, "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"})
     with (
         patch.object(camp_routes, "get_db", return_value=db),
         patch("app.routes.templates.get_db", return_value=db),
@@ -544,7 +540,7 @@ async def test_meta_blast_requires_template_rejects_freeform_media():
                 media_url="https://ex.com/a.jpg",
                 message_purpose="transactional",
             ),
-            user={"_id": user_id, "meta_phone_number_id": PNID},
+            user={"_id": user_id, "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"},
         )
     assert exc.value.status_code == 400
 
@@ -559,7 +555,7 @@ async def test_meta_blast_stores_provider():
     blast_oid = ObjectId()
     db = MagicMock()
     db.templates.find_one = AsyncMock(return_value=tmpl)
-    db.users.find_one = AsyncMock(return_value={"_id": user_id, "meta_phone_number_id": PNID})
+    db.users.find_one = AsyncMock(return_value={"_id": user_id, "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"})
     db.blast_campaigns.insert_one = AsyncMock(return_value=SimpleNamespace(inserted_id=blast_oid))
     db.blast_campaigns.update_one = AsyncMock()
     db.blast_campaigns.delete_one = AsyncMock()
@@ -590,7 +586,7 @@ async def test_meta_blast_stores_provider():
                 content_variables=VARS,
                 message_purpose="transactional",
             ),
-            user={"_id": user_id, "meta_phone_number_id": PNID},
+            user={"_id": user_id, "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"},
         )
     inserted = db.blast_campaigns.insert_one.await_args.args[0]
     assert inserted["provider"] == "meta"
@@ -610,7 +606,7 @@ def test_blast_worker_meta_not_twilio_and_wamid():
     db.leads.find_one = MagicMock(return_value=_opted_lead(user_id))
     db.blacklist.find_one = MagicMock(return_value=None)
     db.templates.find_one = MagicMock(return_value=tmpl)
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "meta_phone_number_id": PNID, "plan": "business", "subscription_status": "active"})
     db.blast_recipients.update_one = MagicMock()
     blast = {
         "provider": "meta",

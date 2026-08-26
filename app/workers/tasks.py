@@ -9,7 +9,11 @@ from redis import Redis
 
 from app.config import settings
 from app.services import twilio_service, openai_service
-from app.services.whatsapp_outbound import send_whatsapp_text, send_whatsapp_template
+from app.services.whatsapp_outbound import (
+    send_whatsapp_media,
+    send_whatsapp_template,
+    send_whatsapp_text,
+)
 from app.services.whatsapp_window import (
     WINDOW_CLOSED_ERROR,
     is_whatsapp_window_open,
@@ -259,18 +263,6 @@ def send_outbound_message(
             reason_code="configuration_error",
         )
         return
-    if msg_provider == "meta" and (
-        media_url
-        or msg.get("media_url")
-    ):
-        _fail_message(
-            db,
-            mid,
-            user_id,
-            "Meta media is not supported yet",
-            reason_code="non_retryable",
-        )
-        return
     if msg_provider == "meta" and (content_sid or msg.get("content_sid")):
         _fail_message(
             db,
@@ -362,6 +354,18 @@ def send_outbound_message(
                     name=(tmpl.get("meta_template_name") or msg.get("meta_template_name") or ""),
                     language_code=(tmpl.get("meta_language_code") or msg.get("meta_language_code") or ""),
                     components=components,
+                    user=user,
+                )
+            elif resolved_media:
+                from app.services.meta_whatsapp_service import media_type_for_mime
+
+                result = send_whatsapp_media(
+                    provider="meta",
+                    to=lead["phone"],
+                    media_url=resolved_media,
+                    media_type=media_type_for_mime(msg.get("media_content_type")),
+                    caption=send_body or None,
+                    filename=msg.get("media_filename"),
                     user=user,
                 )
             else:
@@ -492,7 +496,9 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
     )
 
     user = db.users.find_one({"_id": ObjectId(user_id)})
-    agent = db.agents.find_one({"user_id": user_id, "status": "active"}, sort=[("updated_at", -1)])
+    from app.services.agent_router import select_agent_for_inbound
+
+    agent = select_agent_for_inbound(db, user_id, lead)
     welcome = (agent or {}).get("welcome_message") or ""
     terms = (agent or {}).get("terms_text") or ""
 
@@ -649,6 +655,33 @@ def generate_and_send_ai_reply(
         )
         return
 
+    # Plan entitlement: monthly AI-conversation cap (distinct leads per calendar month).
+    from app.services.entitlements import (
+        ai_conversation_allowed,
+        effective_entitlements,
+        record_ai_conversation,
+    )
+
+    _conv_limit = effective_entitlements(user).get("ai_conversations_month", 0)
+    if not ai_conversation_allowed(_redis(), user_id, lead_id, _conv_limit):
+        db.leads.update_one(
+            {"_id": ObjectId(lead_id)},
+            {"$set": {"needs_human": True, "last_ai_error_category": "ai_conversation_limit"}},
+        )
+        create_notification_sync(
+            db,
+            user_id=user_id,
+            type="system",
+            title="Monthly AI conversation limit reached",
+            message="You've reached your plan's monthly AI conversation limit. Upgrade your plan or reply manually.",
+            resource_type="billing",
+            resource_id=user_id,
+            dedupe_key=f"ai_conv_limit:{user_id}:{datetime.now(timezone.utc).strftime('%Y%m')}",
+        )
+        return
+    # Count this lead as an AI conversation for the month (SADD-deduped; idempotent on retry).
+    record_ai_conversation(_redis(), user_id, lead_id)
+
     if trigger_id:
         idem = make_idempotency_key("ai", user_id, lead_id, trigger_id)
     else:
@@ -707,7 +740,9 @@ def generate_and_send_ai_reply(
         pass
 
     company = (user or {}).get("company_name")
-    agent = db.agents.find_one({"user_id": user_id, "status": "active"}, sort=[("updated_at", -1)])
+    from app.services.agent_router import select_agent_for_inbound
+
+    agent = select_agent_for_inbound(db, user_id, lead)
     agent_id = str(agent["_id"]) if agent and agent.get("_id") else None
     agent_name = ((agent or {}).get("name") or "").strip() or "AI Agent"
     summary_doc = get_summary(db, tenant_id=user_id, lead_id=lead_id)
@@ -731,6 +766,7 @@ def generate_and_send_ai_reply(
             ai_settings=ai,
             summary=summary_text if ctx.get("summary_used") else summary_text,
             user=user,
+            neutral=agent is None,
         )
     except Exception as exc:
         logger.exception(

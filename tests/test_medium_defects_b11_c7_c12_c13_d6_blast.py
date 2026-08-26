@@ -71,10 +71,9 @@ def test_send_welcome_and_terms_sends_welcome_and_terms_and_marks_sent():
     }
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=lead)
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
-    db.agents.find_one = MagicMock(
-        return_value={"welcome_message": "Welcome!", "terms_text": "T&Cs apply"}
-    )
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
+    _agent_doc = {"_id": ObjectId(), "status": "active", "welcome_message": "Welcome!", "terms_text": "T&Cs apply"}
+    db.agents.find.return_value.sort.return_value = [_agent_doc]
     db.messages.insert_one = MagicMock(return_value=SimpleNamespace(inserted_id=ObjectId()))
 
     with (
@@ -109,8 +108,8 @@ def test_send_welcome_and_terms_blocked_when_ineligible():
     }
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=lead)
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
-    db.agents.find_one = MagicMock(return_value={"welcome_message": "Welcome!", "terms_text": ""})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
+    db.agents.find.return_value.sort.return_value = [{"_id": ObjectId(), "status": "active", "welcome_message": "Welcome!", "terms_text": ""}]
 
     with (
         patch.object(tasks, "_db", return_value=db),
@@ -138,8 +137,8 @@ def test_send_welcome_and_terms_records_activity_on_failure():
     }
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=lead)
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
-    db.agents.find_one = MagicMock(return_value={"welcome_message": "Welcome!", "terms_text": ""})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
+    db.agents.find.return_value.sort.return_value = [{"_id": ObjectId(), "status": "active", "welcome_message": "Welcome!", "terms_text": ""}]
 
     with (
         patch.object(tasks, "_db", return_value=db),
@@ -216,7 +215,7 @@ async def test_webhook_ignores_self_sender_and_skips_lead_creation():
     db = MagicMock()
     db.webhook_events.find_one = AsyncMock(return_value=None)
     db.webhook_events.insert_one = AsyncMock()
-    db.users.find_one = AsyncMock(return_value={"_id": user_id, "twilio_whatsapp_to": "+447700900999"})
+    db.users.find_one = AsyncMock(return_value={"_id": user_id, "twilio_whatsapp_to": "+447700900999", "plan": "business", "subscription_status": "active"})
     db.activity_events.insert_one = AsyncMock(return_value=SimpleNamespace(inserted_id=ObjectId()))
 
     with (
@@ -251,7 +250,7 @@ async def test_webhook_processes_normal_inbound_when_not_self_sender():
     db = MagicMock()
     db.webhook_events.find_one = AsyncMock(return_value=None)
     db.webhook_events.insert_one = AsyncMock()
-    db.users.find_one = AsyncMock(return_value={"_id": user_id, "twilio_whatsapp_to": "+447700900999"})
+    db.users.find_one = AsyncMock(return_value={"_id": user_id, "twilio_whatsapp_to": "+447700900999", "plan": "business", "subscription_status": "active"})
     db.blacklist.find_one = AsyncMock(return_value=None)
     db.leads.find_one = AsyncMock(return_value=None)
     db.messages.insert_one = AsyncMock(return_value=SimpleNamespace(inserted_id=ObjectId()))
@@ -432,7 +431,7 @@ def test_generate_and_send_ai_reply_marks_needs_human_for_hard_ai_failures(monke
 
     db = MagicMock()
     db.leads.find_one = MagicMock(return_value=lead)
-    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id)})
+    db.users.find_one = MagicMock(return_value={"_id": ObjectId(user_id), "plan": "business", "subscription_status": "active"})
     db.agents.find_one = MagicMock(return_value=None)
     db.messages.find_one = MagicMock(return_value=None)
 

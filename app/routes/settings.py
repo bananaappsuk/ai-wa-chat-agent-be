@@ -154,6 +154,9 @@ async def complete_meta_onboarding(
     body: MetaOnboardingCompleteBody, user: dict = Depends(current_user)
 ) -> dict:
     require_permission(user, "change_account_settings")
+    from app.services.entitlements import require_can_connect_number
+
+    require_can_connect_number(user)
     rate_limit_user(
         str(user["_id"]),
         bucket="meta_onboarding_complete",

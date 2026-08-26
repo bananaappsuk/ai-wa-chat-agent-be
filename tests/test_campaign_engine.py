@@ -121,7 +121,7 @@ async def test_create_rejects_no_recipients():
     with pytest.raises(HTTPException) as exc:
         await camp_routes.create_campaign(
             CampaignCreate(name="x", message="hi", lead_ids=[], recipients=[]),
-            user={"_id": ObjectId()},
+            user={"_id": ObjectId(), "plan": "business", "subscription_status": "active"},
         )
     assert exc.value.status_code == 400
 
@@ -179,7 +179,7 @@ async def test_create_campaign_with_recipients_and_dedupe():
                 message="Hello",
                 recipients=["+447700900000", "+447700900000", "not-a-phone"],
             ),
-            user={"_id": user_id},
+            user={"_id": user_id, "plan": "business", "subscription_status": "active"},
         )
     assert result["name"] == "Promo"
     assert db.campaign_recipients.insert_many.await_count == 1
@@ -197,7 +197,7 @@ async def test_cross_tenant_campaign_access_denied():
     db.campaigns.find_one = AsyncMock(return_value=None)
     with patch.object(camp_routes, "get_db", return_value=db):
         with pytest.raises(HTTPException) as exc:
-            await camp_routes.get_campaign(str(ObjectId()), user={"_id": ObjectId()})
+            await camp_routes.get_campaign(str(ObjectId()), user={"_id": ObjectId(), "plan": "business", "subscription_status": "active"})
     assert exc.value.status_code == 404
 
 
@@ -213,7 +213,7 @@ async def test_start_only_draft_or_scheduled():
     )
     with patch.object(camp_routes, "get_db", return_value=db):
         with pytest.raises(HTTPException) as exc:
-            await camp_routes.start_campaign(str(cid), user={"_id": user_id}, confirm_marketing=True)
+            await camp_routes.start_campaign(str(cid), user={"_id": user_id, "plan": "business", "subscription_status": "active"}, confirm_marketing=True)
     assert exc.value.status_code == 400
 
 
@@ -229,11 +229,11 @@ async def test_pause_resume_cancel_guards():
 
     with patch.object(camp_routes, "_get_owned", new=AsyncMock(return_value=await owned("draft"))):
         with pytest.raises(HTTPException):
-            await camp_routes.pause_campaign(str(cid), user={"_id": user_id})
+            await camp_routes.pause_campaign(str(cid), user={"_id": user_id, "plan": "business", "subscription_status": "active"})
 
     with patch.object(camp_routes, "_get_owned", new=AsyncMock(return_value=await owned("running"))):
         with pytest.raises(HTTPException):
-            await camp_routes.resume_campaign(str(cid), user={"_id": user_id})
+            await camp_routes.resume_campaign(str(cid), user={"_id": user_id, "plan": "business", "subscription_status": "active"})
 
 
 def test_send_recipient_idempotent_claim():

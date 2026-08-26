@@ -376,8 +376,11 @@ async def create_campaign(payload: CampaignCreate, user: dict = Depends(current_
     from app.security.rate_limit import rate_limit_campaign
     from app.security.validation import limit_list, limit_template_variables
 
+    from app.services.entitlements import require_feature
+
     user_id = str(user["_id"])
     require_permission(user, "campaigns.create")
+    require_feature(user, "campaigns", label="Campaign management")
     rate_limit_campaign(user_id)
     db = get_db()
     max_r = int(settings.CAMPAIGN_MAX_RECIPIENTS_PER_REQUEST)
@@ -646,8 +649,11 @@ async def start_campaign(
     )
     from app.services.throughput import assert_bulk_enqueue_allowed
 
+    from app.services.entitlements import require_feature
+
     user_id = str(user["_id"])
     require_permission(user, "campaigns.start")
+    require_feature(user, "campaigns", label="Campaign management")
     rate_limit_campaign(user_id)
     doc = await _get_owned(cid, user_id)
     if doc.get("status") not in ("draft", "scheduled", "queued"):
@@ -1666,8 +1672,10 @@ async def create_blast(payload: BlastCreate, user: dict = Depends(current_user))
     from app.security.validation import limit_list, limit_template_variables
     from app.services.throughput import assert_bulk_enqueue_allowed
     from app.services.whatsapp_eligibility import get_whatsapp_send_eligibility
+    from app.services.entitlements import require_feature
 
     user_id = str(user["_id"])
+    require_feature(user, "whatsapp_broadcast", label="WhatsApp broadcast")
     rate_limit_campaign(user_id)
     db = get_db()
     payload.recipients = limit_list(

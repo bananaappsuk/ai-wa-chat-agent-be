@@ -162,6 +162,9 @@ async def _apply_profile_update(payload: ProfileUpdate, user: dict) -> UserOut:
     db = get_db()
     new_wa = update.get("twilio_whatsapp_to")
     if new_wa:
+        from app.services.entitlements import require_can_connect_number
+
+        require_can_connect_number(user)
         clash = await db.users.find_one(
             {"twilio_whatsapp_to": new_wa, "_id": {"$ne": ObjectId(user["_id"])}}
         )

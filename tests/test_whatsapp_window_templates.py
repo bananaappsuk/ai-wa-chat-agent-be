@@ -124,7 +124,7 @@ async def test_send_message_allows_approved_template_outside_window():
         "content_sid": "HXabc123",
         "created_at": datetime.now(timezone.utc),
     }
-    user = {"_id": user_id}
+    user = {"_id": user_id, "plan": "business", "subscription_status": "active"}
 
     with (
         patch.object(messages_route.lead_service, "get_lead", new=AsyncMock(return_value=lead)),
@@ -251,7 +251,7 @@ def test_ai_job_rechecks_window_before_send():
     db.leads.find_one = MagicMock(
         side_effect=[lead_open, lead_open, lead_closed]
     )
-    db.users.find_one = MagicMock(return_value={"company_name": "Co", "ai_settings": {}})
+    db.users.find_one = MagicMock(return_value={"company_name": "Co", "ai_settings": {}, "plan": "business", "subscription_status": "active"})
     db.agents.find_one = MagicMock(return_value={"prompt": "hi"})
     db.messages.find = MagicMock(
         return_value=MagicMock(

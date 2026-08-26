@@ -230,6 +230,117 @@ def send_text(
     )
 
 
+_MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
+
+
+def media_type_for_mime(mime: Optional[str]) -> str:
+    m = (mime or "").split(";")[0].strip().lower()
+    if m.startswith("image/"):
+        return "sticker" if m == "image/webp" else "image"
+    if m.startswith("video/"):
+        return "video"
+    if m.startswith("audio/"):
+        return "audio"
+    return "document"
+
+
+def send_media(
+    *,
+    to: str,
+    media_url: str,
+    media_type: str,
+    caption: Optional[str] = None,
+    filename: Optional[str] = None,
+    user: Optional[dict] = None,
+    phone_number_id: Optional[str] = None,
+) -> MetaSendResult:
+    """Send a media message via Meta Cloud API using a public link (no upload step).
+
+    Meta fetches ``media_url`` itself, so it must be a publicly reachable https URL.
+    """
+    from app.services.meta_credentials import (
+        MetaCredentialsError,
+        get_meta_credentials_for_user,
+        maybe_mark_meta_auth_death,
+    )
+
+    link = (media_url or "").strip()
+    if not link.lower().startswith("https://"):
+        raise MetaWhatsAppError("Meta media requires a public https URL")
+    mtype = (media_type or "document").strip().lower()
+    if mtype not in _MEDIA_TYPES:
+        mtype = "document"
+
+    try:
+        creds = get_meta_credentials_for_user(user)
+    except MetaCredentialsError as exc:
+        raise MetaWhatsAppError(str(exc)) from exc
+
+    to_digits = _to_meta_digits(to)
+    explicit = (phone_number_id or "").strip()
+    if explicit and explicit != creds.phone_number_id:
+        raise MetaWhatsAppError("Tenant meta_phone_number_id does not match send credentials")
+    phone_number_id = creds.phone_number_id
+    version = (settings.META_GRAPH_VERSION or "v21.0").strip().lstrip("/")
+    url = f"https://graph.facebook.com/{version}/{phone_number_id}/messages"
+
+    media_obj: dict = {"link": link}
+    # Caption is allowed on image/video/document; audio/sticker cannot carry one.
+    if caption and mtype in ("image", "video", "document"):
+        media_obj["caption"] = caption[:1024]
+    if mtype == "document" and filename:
+        media_obj["filename"] = filename[:240]
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to_digits,
+        "type": mtype,
+        mtype: media_obj,
+    }
+    headers = {
+        "Authorization": f"Bearer {creds.access_token}",
+        "Content-Type": "application/json",
+    }
+    timeout = max(5.0, float(settings.META_HTTP_TIMEOUT_SECONDS or 30.0))
+    logger.info("meta_send_media phone_number_id=%s to=%s type=%s", phone_number_id, to_digits, mtype)
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, json=payload, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise MetaWhatsAppError("Meta Graph API request timed out") from exc
+    except httpx.HTTPError as exc:
+        raise MetaWhatsAppError(f"Meta Graph API request failed: {type(exc).__name__}") from exc
+
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": (resp.text or "")[:500]}
+
+    if resp.is_error:
+        err = data.get("error") if isinstance(data, dict) else None
+        msg = "Meta Graph API media send failed"
+        if isinstance(err, dict):
+            msg = str(err.get("message") or msg)
+        logger.warning("meta_send_media failed status=%s to=%s error=%s", resp.status_code, to_digits, (msg or "")[:200])
+        maybe_mark_meta_auth_death(user, http_status=resp.status_code, error=err)
+        raise MetaWhatsAppError(msg, status_code=resp.status_code, details=err or data)
+
+    message_id = None
+    if isinstance(data, dict):
+        messages = data.get("messages")
+        if isinstance(messages, list) and messages and isinstance(messages[0], dict):
+            message_id = messages[0].get("id")
+    return MetaSendResult(
+        provider="meta",
+        provider_message_id=str(message_id) if message_id else None,
+        phone_number_id=phone_number_id,
+        to=to_digits,
+        raw=data if isinstance(data, dict) else {"response": data},
+    )
+
+
 def send_template(
     *,
     to: str,
