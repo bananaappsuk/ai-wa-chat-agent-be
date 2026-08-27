@@ -1,5 +1,12 @@
 # Render Blueprint — separate API, worker, and scheduler services.
 # Do NOT combine API + worker in one process.
+#
+# All three services run validate_for_startup() in production, so each one needs the
+# same required env set (Mongo, Redis, JWT, Twilio, PUBLIC_BASE_URL, CORS_ORIGINS,
+# META_TOKEN_ENCRYPTION_KEY, ...). A missing var makes that service exit on boot, which
+# stops the queue from draining. Set every `sync: false` value in the dashboard (or a
+# shared env group) identically across all three services.
+
 services:
   - type: web
     name: ai-wa-chat-api
@@ -17,6 +24,76 @@ services:
         value: "false"
       - key: WEB_CONCURRENCY
         value: "1"
+      - key: TWILIO_VALIDATE_SIGNATURE
+        value: "true"
+      - key: META_WEBHOOK_VALIDATE_SIGNATURE
+        value: "true"
+      - key: META_ALLOW_LEGACY_POC_TOKEN
+        value: "false"
+      - key: WHATSAPP_PROVIDER
+        value: twilio
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: FRONTEND_BASE_URL
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_FROM
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: META_TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_WEBHOOK_VERIFY_TOKEN
+        sync: false
+      - key: META_PHONE_NUMBER_ID
+        sync: false
+      - key: META_WABA_ID
+        sync: false
+      - key: METRICS_TOKEN
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+
+  - type: worker
+    name: ai-wa-chat-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: sh start-worker.sh
+    plan: starter
+    # Scale replicas up as WhatsApp volume grows (each drains high/default/bulk queues).
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: SERVICE_NAME
+        value: ai-wa-chat-agent-worker
+      - key: METRICS_ENABLED
+        value: "false"
+      - key: TWILIO_VALIDATE_SIGNATURE
+        value: "true"
+      - key: META_WEBHOOK_VALIDATE_SIGNATURE
+        value: "true"
+      - key: META_ALLOW_LEGACY_POC_TOKEN
+        value: "false"
+      - key: WHATSAPP_PROVIDER
+        value: twilio
       - key: MONGO_URI
         sync: false
       - key: MONGO_DB
@@ -35,46 +112,19 @@ services:
         sync: false
       - key: TWILIO_WHATSAPP_FROM
         sync: false
-      - key: TWILIO_VALIDATE_SIGNATURE
-        value: "true"
       - key: OPENAI_API_KEY
         sync: false
-      - key: SENTRY_DSN
+      - key: META_TOKEN_ENCRYPTION_KEY
         sync: false
-      - key: METRICS_TOKEN
+      - key: META_APP_ID
         sync: false
-
-  - type: worker
-    name: ai-wa-chat-worker
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    dockerCommand: sh start-worker.sh
-    plan: starter
-    envVars:
-      - fromService:
-          type: web
-          name: ai-wa-chat-api
-          envVarKey: APP_ENV
-      - key: SERVICE_NAME
-        value: ai-wa-chat-agent-worker
-      - key: MONGO_URI
+      - key: META_APP_SECRET
         sync: false
-      - key: MONGO_DB
+      - key: META_WEBHOOK_VERIFY_TOKEN
         sync: false
-      - key: REDIS_URL
+      - key: META_PHONE_NUMBER_ID
         sync: false
-      - key: JWT_SECRET
-        sync: false
-      - key: PUBLIC_BASE_URL
-        sync: false
-      - key: TWILIO_ACCOUNT_SID
-        sync: false
-      - key: TWILIO_AUTH_TOKEN
-        sync: false
-      - key: TWILIO_WHATSAPP_FROM
-        sync: false
-      - key: OPENAI_API_KEY
+      - key: META_WABA_ID
         sync: false
       - key: SENTRY_DSN
         sync: false
@@ -86,12 +136,22 @@ services:
     dockerContext: .
     dockerCommand: sh start-scheduler.sh
     plan: starter
-    # Keep a single scheduler instance (do not scale replicas).
+    # Keep a SINGLE scheduler instance (do not scale replicas — it holds a Redis lock).
     envVars:
       - key: APP_ENV
         value: production
       - key: SERVICE_NAME
         value: ai-wa-chat-agent-scheduler
+      - key: METRICS_ENABLED
+        value: "false"
+      - key: TWILIO_VALIDATE_SIGNATURE
+        value: "true"
+      - key: META_WEBHOOK_VALIDATE_SIGNATURE
+        value: "true"
+      - key: META_ALLOW_LEGACY_POC_TOKEN
+        value: "false"
+      - key: WHATSAPP_PROVIDER
+        value: twilio
       - key: MONGO_URI
         sync: false
       - key: MONGO_DB
@@ -100,6 +160,8 @@ services:
         sync: false
       - key: JWT_SECRET
         sync: false
+      - key: CORS_ORIGINS
+        sync: false
       - key: PUBLIC_BASE_URL
         sync: false
       - key: TWILIO_ACCOUNT_SID
@@ -107,6 +169,20 @@ services:
       - key: TWILIO_AUTH_TOKEN
         sync: false
       - key: TWILIO_WHATSAPP_FROM
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: META_TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_WEBHOOK_VERIFY_TOKEN
+        sync: false
+      - key: META_PHONE_NUMBER_ID
+        sync: false
+      - key: META_WABA_ID
         sync: false
       - key: SENTRY_DSN
         sync: false
