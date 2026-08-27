@@ -28,6 +28,13 @@ def test_manual_override_is_entitled():
     assert ent.effective_plan_key(_user("business", "manual_override")) == "business"
 
 
+def test_enterprise_always_entitled_without_subscription():
+    # Enterprise is contact-sales / manually assigned — no Stripe subscription.
+    assert ent.effective_plan_key(_user("enterprise", "none")) == "enterprise"
+    assert ent.effective_plan_key(_user("enterprise", None)) == "enterprise"
+    assert ent.effective_entitlements(_user("enterprise", "none"))["ai_conversations_month"] == -1
+
+
 def test_paid_plan_without_active_subscription_falls_back_to_free():
     # e.g. incomplete/canceled/none -> not entitled
     assert ent.effective_plan_key(_user("professional", "incomplete")) == "free"

@@ -45,11 +45,15 @@ _AICONV_TTL_SECONDS = 40 * 24 * 3600  # a bit over a month so the set survives t
 
 
 def effective_plan_key(user: Optional[dict]) -> str:
-    """The plan whose entitlements currently apply. A paid plan only counts while the
-    subscription is in an entitled state; otherwise the user falls back to free."""
+    """The plan whose entitlements currently apply. A Stripe-backed paid plan only counts
+    while the subscription is in an entitled state; otherwise the user falls back to free.
+    Enterprise is contact-sales / manually assigned (never Stripe-backed), so it is always
+    entitled."""
     plan = normalize_plan_key((user or {}).get("plan"))
     if plan == "free":
         return "free"
+    if plan == "enterprise":
+        return "enterprise"
     status = ((user or {}).get("subscription_status") or "none").strip().lower()
     return plan if status in ENTITLED_STATUSES else "free"
 
