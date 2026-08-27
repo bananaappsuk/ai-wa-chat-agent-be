@@ -22,6 +22,9 @@ services:
         value: ai-wa-chat-agent-api
       - key: RUN_INLINE_SCHEDULER
         value: "false"
+      # Blueprint uses a dedicated worker service, so the API runs API-only.
+      - key: WORKER_IN_API
+        value: "false"
       - key: WEB_CONCURRENCY
         value: "1"
       - key: TWILIO_VALIDATE_SIGNATURE
