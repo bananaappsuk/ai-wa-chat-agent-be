@@ -11,7 +11,6 @@ from app.db.mongo import get_db
 from app.models.common import serialize, utcnow
 from app.services.delivery_status import (
     build_status_update,
-    is_failure_status,
     log_duplicate_sid,
     normalize_status,
 )
@@ -141,7 +140,9 @@ async def apply_meta_status_update(
         )
         applied = applied or result.get("updated", False)
 
+    seen_blast: set[str] = set()
     for recipient in blast_recipients:
+        seen_blast.add(str(recipient["_id"]))
         result = await _update_blast_recipient(
             db,
             recipient,
@@ -273,6 +274,78 @@ async def apply_twilio_status_callback(
     return {"updated": updated_any, "kind": "campaign_recipient", "count": len(camp_recipients)}
 
 
+async def _resync_blast_from_recipients(
+    db,
+    *,
+    blast_id: str,
+    user_id: str,
+    event_extra: Optional[dict[str, Any]] = None,
+) -> Optional[dict]:
+    """
+    Recalculate blast counters (and terminal status when safe) from current
+    blast_recipients documents. Prefer this over $inc so late failure callbacks
+    cannot leave sent_count and failed_count both claiming the same recipient.
+    """
+    from app.workers.tasks import (
+        blast_fields_from_status_counts,
+        derive_blast_status_after_recount,
+    )
+
+    if not ObjectId.is_valid(str(blast_id)):
+        return None
+    bid = ObjectId(str(blast_id))
+    blast_id_str = str(blast_id)
+    pipe = [
+        {"$match": {"blast_id": {"$in": [blast_id_str, bid]}}},
+        {"$group": {"_id": "$status", "n": {"$sum": 1}}},
+    ]
+    rows = await db.blast_recipients.aggregate(pipe).to_list(50)
+    counts = {str(r["_id"]): int(r["n"]) for r in rows}
+    fields = blast_fields_from_status_counts(counts)
+    open_count = int(fields.pop("open_count", 0) or 0)
+    blast = await db.blast_campaigns.find_one({"_id": bid})
+    if not blast:
+        return None
+    set_fields: dict[str, Any] = {
+        "sent_count": fields["sent_count"],
+        "failed_count": fields["failed_count"],
+        "cancelled_count": fields["cancelled_count"],
+        "delivered_count": fields["delivered_count"],
+        "read_count": fields["read_count"],
+        "undelivered_count": fields["undelivered_count"],
+        "updated_at": utcnow(),
+    }
+    new_status = derive_blast_status_after_recount(
+        sent=int(set_fields["sent_count"]),
+        failed=int(set_fields["failed_count"]),
+        total=int(blast.get("total_recipients") or 0),
+        current_status=str(blast.get("status") or ""),
+        open_count=open_count,
+    )
+    if new_status is not None:
+        set_fields["status"] = new_status
+    await db.blast_campaigns.update_one({"_id": bid}, {"$set": set_fields})
+    fresh = await db.blast_campaigns.find_one({"_id": bid})
+    if isinstance(fresh, dict):
+        fresh = {**fresh, **set_fields}
+    if user_id and fresh:
+        payload = {
+            "id": blast_id_str,
+            "sent_count": fresh.get("sent_count", 0),
+            "failed_count": fresh.get("failed_count", 0),
+            "cancelled_count": fresh.get("cancelled_count", 0),
+            "delivered_count": fresh.get("delivered_count", 0),
+            "read_count": fresh.get("read_count", 0),
+            "undelivered_count": fresh.get("undelivered_count", 0),
+            "status": fresh.get("status"),
+            "total_recipients": fresh.get("total_recipients"),
+        }
+        if event_extra:
+            payload.update(event_extra)
+        _publish_best_effort(user_id, "blast:updated", payload)
+    return fresh
+
+
 async def _update_blast_recipient(
     db,
     recipient: dict,
@@ -292,7 +365,6 @@ async def _update_blast_recipient(
         return {"updated": False}
 
     user_id = str(blast.get("user_id") or "")
-    old_status = normalize_status(recipient.get("status")) or (recipient.get("status") or "")
     set_fields = build_status_update(
         recipient,
         status_raw,
@@ -303,62 +375,17 @@ async def _update_blast_recipient(
         return {"updated": False}
 
     await db.blast_recipients.update_one({"_id": recipient["_id"]}, {"$set": set_fields})
-    new_status = set_fields.get("status") or old_status
+    new_status = set_fields.get("status") or recipient.get("status")
 
-    metric_inc: dict[str, int] = {}
-    old_fail = is_failure_status(old_status)
-    new_fail = is_failure_status(new_status)
-    if new_fail and not old_fail:
-        metric_inc["failed_count"] = 1
-
-    # Legacy blasts stored Twilio "queued" as recipient status; that was never
-    # counted in sent_count. When delivery webhooks arrive, promote the counter.
-    counted_as_sent = ("sent", "delivered", "read", "queued", "accepted", "sending")
-    if new_status in ("sent", "delivered", "read") and old_status not in counted_as_sent:
-        metric_inc["sent_count"] = 1
-    elif (
-        new_status in ("delivered", "read")
-        and old_status in ("queued", "accepted", "sending")
-        and int(blast.get("sent_count") or 0) < int(blast.get("total_recipients") or 0)
-    ):
-        # Old bug: queued recipients left sent_count at 0; fix on delivery callback.
-        metric_inc["sent_count"] = 1
-
-    old_delivered = old_status in ("delivered", "read")
-    new_delivered = new_status in ("delivered", "read")
-    if new_delivered and not old_delivered:
-        metric_inc["delivered_count"] = 1
-
-    if new_status == "read" and old_status != "read":
-        metric_inc["read_count"] = 1
-
-    if new_status == "undelivered" and old_status != "undelivered":
-        metric_inc["undelivered_count"] = 1
-
-    if metric_inc:
-        await db.blast_campaigns.update_one(
-            {"_id": blast["_id"]},
-            {"$inc": metric_inc, "$set": {"updated_at": utcnow()}},
-        )
-
-    fresh_blast = await db.blast_campaigns.find_one({"_id": blast["_id"]})
-    if user_id and fresh_blast:
-        _publish_best_effort(
-            user_id,
-            "blast:updated",
-            {
-                "id": str(blast["_id"]),
-                "recipient_id": str(recipient["_id"]),
-                "recipient_status": new_status,
-                "sent_count": fresh_blast.get("sent_count", 0),
-                "failed_count": fresh_blast.get("failed_count", 0),
-                "delivered_count": fresh_blast.get("delivered_count", 0),
-                "read_count": fresh_blast.get("read_count", 0),
-                "undelivered_count": fresh_blast.get("undelivered_count", 0),
-                "status": fresh_blast.get("status"),
-                "total_recipients": fresh_blast.get("total_recipients"),
-            },
-        )
+    await _resync_blast_from_recipients(
+        db,
+        blast_id=str(blast_id),
+        user_id=user_id,
+        event_extra={
+            "recipient_id": str(recipient["_id"]),
+            "recipient_status": new_status,
+        },
+    )
     return {"updated": True, "status": new_status}
 
 

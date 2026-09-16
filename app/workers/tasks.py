@@ -1008,6 +1008,60 @@ def generate_and_send_ai_reply(
 # Blast recipient lifecycle: pending -> processing -> sent | retrying -> failed | cancelled
 BLAST_OPEN_STATUSES = frozenset({"pending", "processing", "retrying"})
 BLAST_TERMINAL_STATUSES = frozenset({"completed", "partially_completed", "failed", "cancelled"})
+# Provider-accepted / in-flight toward delivery (counted as sent_count for blast history).
+BLAST_SENT_STATUSES = frozenset({"sent", "delivered", "read", "queued", "accepted", "sending"})
+# Final delivery failures — both must contribute to failed_count (callbacks may store either).
+BLAST_FAILED_STATUSES = frozenset({"failed", "undelivered"})
+
+
+def blast_fields_from_status_counts(counts: dict[str, int]) -> dict:
+    """Derive blast counter fields from a status→count map (source of truth)."""
+    sent = sum(int(counts.get(s, 0) or 0) for s in BLAST_SENT_STATUSES)
+    failed = sum(int(counts.get(s, 0) or 0) for s in BLAST_FAILED_STATUSES)
+    cancelled = int(counts.get("cancelled", 0) or 0) + int(counts.get("canceled", 0) or 0)
+    delivered = int(counts.get("delivered", 0) or 0) + int(counts.get("read", 0) or 0)
+    read = int(counts.get("read", 0) or 0)
+    undelivered = int(counts.get("undelivered", 0) or 0)
+    open_count = sum(int(counts.get(s, 0) or 0) for s in BLAST_OPEN_STATUSES)
+    return {
+        "sent_count": sent,
+        "failed_count": failed,
+        "cancelled_count": cancelled,
+        "delivered_count": delivered,
+        "read_count": read,
+        "undelivered_count": undelivered,
+        "open_count": open_count,
+    }
+
+
+def derive_blast_status_after_recount(
+    *,
+    sent: int,
+    failed: int,
+    total: int,
+    current_status: str,
+    open_count: int,
+) -> Optional[str]:
+    """
+    Return a new blast status, or None to leave status unchanged.
+
+    While recipients are still open (pending/processing/retrying), do not force
+    terminal completed/failed/partially_completed — the worker owns that lifecycle.
+    Once no open recipients remain, recompute terminal status even if the blast
+    was previously finalized (so late Twilio failure callbacks correct COMPLETED).
+    """
+    cur = (current_status or "").strip().lower()
+    if cur in ("cancelled", "paused"):
+        return None
+    if open_count > 0:
+        return None
+    if sent > 0 and failed > 0:
+        return "partially_completed"
+    if failed > 0 and sent == 0:
+        return "failed"
+    if sent == 0 and failed == 0 and int(total or 0) == 0:
+        return "failed"
+    return "completed"
 
 
 def _cancel_open_blast_recipients(db, blast_id: str) -> None:
@@ -1017,29 +1071,45 @@ def _cancel_open_blast_recipients(db, blast_id: str) -> None:
     )
 
 
-def _recount_blast(db, user_id: str, blast_id: str) -> Optional[dict]:
+def _recount_blast(
+    db,
+    user_id: str,
+    blast_id: str,
+    *,
+    recompute_status: bool = False,
+) -> Optional[dict]:
     pipe = [
         {"$match": {"blast_id": blast_id}},
         {"$group": {"_id": "$status", "n": {"$sum": 1}}},
     ]
     counts = {str(row["_id"]): int(row["n"]) for row in db.blast_recipients.aggregate(pipe)}
-    # Twilio create often returns "queued"/"accepted"; treat those as sent (same as Live Chat).
-    sent = (
-        counts.get("sent", 0)
-        + counts.get("delivered", 0)
-        + counts.get("read", 0)
-        + counts.get("queued", 0)
-        + counts.get("accepted", 0)
-        + counts.get("sending", 0)
-    )
-    failed = counts.get("failed", 0)
-    cancelled = counts.get("cancelled", 0)
-    db.blast_campaigns.update_one(
-        {"_id": ObjectId(blast_id)},
-        {"$set": {"sent_count": sent, "failed_count": failed, "cancelled_count": cancelled}},
-    )
+    fields = blast_fields_from_status_counts(counts)
+    open_count = int(fields.pop("open_count", 0) or 0)
+    set_fields = {
+        "sent_count": fields["sent_count"],
+        "failed_count": fields["failed_count"],
+        "cancelled_count": fields["cancelled_count"],
+        "delivered_count": fields["delivered_count"],
+        "read_count": fields["read_count"],
+        "undelivered_count": fields["undelivered_count"],
+    }
+    blast = db.blast_campaigns.find_one({"_id": ObjectId(blast_id)})
+    if recompute_status and blast:
+        new_status = derive_blast_status_after_recount(
+            sent=int(set_fields["sent_count"]),
+            failed=int(set_fields["failed_count"]),
+            total=int(blast.get("total_recipients") or 0),
+            current_status=str(blast.get("status") or ""),
+            open_count=open_count,
+        )
+        if new_status is not None:
+            set_fields["status"] = new_status
+    db.blast_campaigns.update_one({"_id": ObjectId(blast_id)}, {"$set": set_fields})
     blast = db.blast_campaigns.find_one({"_id": ObjectId(blast_id)})
     if blast:
+        # When find_one mocks don't reflect $set, merge for publish/return consistency.
+        if isinstance(blast, dict):
+            blast = {**blast, **set_fields}
         _publish(
             user_id,
             "blast:updated",
@@ -1059,21 +1129,8 @@ def _recount_blast(db, user_id: str, blast_id: str) -> Optional[dict]:
 
 
 def _finalize_blast(db, user_id: str, blast_id: str) -> None:
-    blast = _recount_blast(db, user_id, blast_id)
-    if not blast or blast.get("status") in BLAST_TERMINAL_STATUSES:
-        return
-    sent = int(blast.get("sent_count") or 0)
-    failed = int(blast.get("failed_count") or 0)
-    if sent > 0 and failed > 0:
-        final_status = "partially_completed"
-    elif failed > 0 and sent == 0:
-        final_status = "failed"
-    elif sent == 0 and failed == 0 and int(blast.get("total_recipients") or 0) == 0:
-        final_status = "failed"
-    else:
-        final_status = "completed"
-    db.blast_campaigns.update_one({"_id": ObjectId(blast_id)}, {"$set": {"status": final_status}})
-    _recount_blast(db, user_id, blast_id)
+    """Recount recipients and set terminal blast status when the worker finishes."""
+    _recount_blast(db, user_id, blast_id, recompute_status=True)
 
 
 def _process_blast_recipient(

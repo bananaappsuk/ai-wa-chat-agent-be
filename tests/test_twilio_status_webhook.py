@@ -234,6 +234,7 @@ def test_failure_callback_stores_error(client):
 
 
 def test_blast_recipient_callback_updates_metrics(client):
+    """Delivered callback recounts from recipients (no fragile $inc)."""
     rid = ObjectId()
     bid = ObjectId()
     user_id = str(ObjectId())
@@ -262,9 +263,14 @@ def test_blast_recipient_callback_updates_metrics(client):
         return_value=MagicMock(to_list=AsyncMock(return_value=[recipient]))
     )
     recipients_coll.update_one = AsyncMock()
+    recipients_coll.aggregate = MagicMock(
+        return_value=MagicMock(
+            to_list=AsyncMock(return_value=[{"_id": "delivered", "n": 1}])
+        )
+    )
 
     blasts_coll = MagicMock()
-    blasts_coll.find_one = AsyncMock(side_effect=[blast, {**blast, "delivered_count": 1}])
+    blasts_coll.find_one = AsyncMock(return_value=blast)
     blasts_coll.update_one = AsyncMock()
 
     db = _db_with_messages(messages_coll, recipients_coll)
@@ -283,10 +289,294 @@ def test_blast_recipient_callback_updates_metrics(client):
     assert res.status_code == 200
     assert recipients_coll.update_one.await_count == 1
     assert blasts_coll.update_one.await_count == 1
-    inc = blasts_coll.update_one.await_args[0][1]["$inc"]
-    assert inc.get("delivered_count") == 1
+    set_fields = blasts_coll.update_one.await_args[0][1]["$set"]
+    assert set_fields.get("sent_count") == 1
+    assert set_fields.get("failed_count") == 0
+    assert set_fields.get("delivered_count") == 1
+    assert set_fields.get("status") == "completed"
+    assert "$inc" not in blasts_coll.update_one.await_args[0][1]
     publish.assert_called()
     assert publish.call_args[0][1] == "blast:updated"
+
+
+def test_blast_completed_then_failed_callback_recounts(client):
+    """Twilio accepted → completed → later failed → 0 sent, 1 failed, status failed."""
+    rid = ObjectId()
+    bid = ObjectId()
+    user_id = str(ObjectId())
+    recipient = {
+        "_id": rid,
+        "blast_id": str(bid),
+        "phone": "+15551212",
+        "status": "sent",
+        "twilio_sid": "SMblastFail",
+    }
+    blast = {
+        "_id": bid,
+        "user_id": user_id,
+        "sent_count": 1,
+        "failed_count": 0,
+        "delivered_count": 0,
+        "status": "completed",
+        "total_recipients": 1,
+    }
+
+    messages_coll = MagicMock()
+    messages_coll.find = _empty_find()
+    recipients_coll = MagicMock()
+    recipients_coll.find = MagicMock(
+        return_value=MagicMock(to_list=AsyncMock(return_value=[recipient]))
+    )
+    recipients_coll.update_one = AsyncMock()
+    recipients_coll.aggregate = MagicMock(
+        return_value=MagicMock(to_list=AsyncMock(return_value=[{"_id": "failed", "n": 1}]))
+    )
+    blasts_coll = MagicMock()
+    blasts_coll.find_one = AsyncMock(return_value=blast)
+    blasts_coll.update_one = AsyncMock()
+    db = _db_with_messages(messages_coll, recipients_coll)
+    db.blast_campaigns = blasts_coll
+
+    with (
+        patch("app.routes.webhook.twilio_service.validate_signature", return_value=True),
+        patch("app.services.status_callback.get_db", return_value=db),
+        patch("app.services.status_callback._publish_best_effort"),
+    ):
+        res = client.post(
+            "/api/webhook/twilio/status",
+            data={
+                "MessageSid": "SMblastFail",
+                "MessageStatus": "failed",
+                "ErrorCode": "63112",
+                "ErrorMessage": "provider failure",
+            },
+        )
+
+    assert res.status_code == 200
+    set_fields = blasts_coll.update_one.await_args[0][1]["$set"]
+    assert set_fields["sent_count"] == 0
+    assert set_fields["failed_count"] == 1
+    assert set_fields["status"] == "failed"
+
+
+def test_blast_completed_then_undelivered_callback_recounts(client):
+    rid = ObjectId()
+    bid = ObjectId()
+    user_id = str(ObjectId())
+    recipient = {
+        "_id": rid,
+        "blast_id": str(bid),
+        "status": "sent",
+        "twilio_sid": "SMundel",
+    }
+    blast = {
+        "_id": bid,
+        "user_id": user_id,
+        "sent_count": 1,
+        "failed_count": 0,
+        "status": "completed",
+        "total_recipients": 1,
+    }
+    messages_coll = MagicMock()
+    messages_coll.find = _empty_find()
+    recipients_coll = MagicMock()
+    recipients_coll.find = MagicMock(
+        return_value=MagicMock(to_list=AsyncMock(return_value=[recipient]))
+    )
+    recipients_coll.update_one = AsyncMock()
+    recipients_coll.aggregate = MagicMock(
+        return_value=MagicMock(
+            to_list=AsyncMock(return_value=[{"_id": "undelivered", "n": 1}])
+        )
+    )
+    blasts_coll = MagicMock()
+    blasts_coll.find_one = AsyncMock(return_value=blast)
+    blasts_coll.update_one = AsyncMock()
+    db = _db_with_messages(messages_coll, recipients_coll)
+    db.blast_campaigns = blasts_coll
+
+    with (
+        patch("app.routes.webhook.twilio_service.validate_signature", return_value=True),
+        patch("app.services.status_callback.get_db", return_value=db),
+        patch("app.services.status_callback._publish_best_effort"),
+    ):
+        res = client.post(
+            "/api/webhook/twilio/status",
+            data={"MessageSid": "SMundel", "MessageStatus": "undelivered"},
+        )
+
+    assert res.status_code == 200
+    set_fields = blasts_coll.update_one.await_args[0][1]["$set"]
+    assert set_fields["sent_count"] == 0
+    assert set_fields["failed_count"] == 1
+    assert set_fields["undelivered_count"] == 1
+    assert set_fields["status"] == "failed"
+
+
+def test_blast_mixed_recipients_partially_completed(client):
+    rid = ObjectId()
+    bid = ObjectId()
+    user_id = str(ObjectId())
+    recipient = {
+        "_id": rid,
+        "blast_id": str(bid),
+        "status": "sent",
+        "twilio_sid": "SMmix",
+    }
+    blast = {
+        "_id": bid,
+        "user_id": user_id,
+        "sent_count": 2,
+        "failed_count": 0,
+        "status": "completed",
+        "total_recipients": 2,
+    }
+    messages_coll = MagicMock()
+    messages_coll.find = _empty_find()
+    recipients_coll = MagicMock()
+    recipients_coll.find = MagicMock(
+        return_value=MagicMock(to_list=AsyncMock(return_value=[recipient]))
+    )
+    recipients_coll.update_one = AsyncMock()
+    recipients_coll.aggregate = MagicMock(
+        return_value=MagicMock(
+            to_list=AsyncMock(
+                return_value=[{"_id": "delivered", "n": 1}, {"_id": "failed", "n": 1}]
+            )
+        )
+    )
+    blasts_coll = MagicMock()
+    blasts_coll.find_one = AsyncMock(return_value=blast)
+    blasts_coll.update_one = AsyncMock()
+    db = _db_with_messages(messages_coll, recipients_coll)
+    db.blast_campaigns = blasts_coll
+
+    with (
+        patch("app.routes.webhook.twilio_service.validate_signature", return_value=True),
+        patch("app.services.status_callback.get_db", return_value=db),
+        patch("app.services.status_callback._publish_best_effort"),
+    ):
+        res = client.post(
+            "/api/webhook/twilio/status",
+            data={"MessageSid": "SMmix", "MessageStatus": "failed"},
+        )
+
+    assert res.status_code == 200
+    set_fields = blasts_coll.update_one.await_args[0][1]["$set"]
+    assert set_fields["sent_count"] == 1
+    assert set_fields["failed_count"] == 1
+    assert set_fields["status"] == "partially_completed"
+
+
+def test_blast_all_delivered_stays_completed(client):
+    rid = ObjectId()
+    bid = ObjectId()
+    user_id = str(ObjectId())
+    recipient = {
+        "_id": rid,
+        "blast_id": str(bid),
+        "status": "sent",
+        "twilio_sid": "SMallok",
+    }
+    blast = {
+        "_id": bid,
+        "user_id": user_id,
+        "sent_count": 2,
+        "failed_count": 0,
+        "status": "completed",
+        "total_recipients": 2,
+    }
+    messages_coll = MagicMock()
+    messages_coll.find = _empty_find()
+    recipients_coll = MagicMock()
+    recipients_coll.find = MagicMock(
+        return_value=MagicMock(to_list=AsyncMock(return_value=[recipient]))
+    )
+    recipients_coll.update_one = AsyncMock()
+    recipients_coll.aggregate = MagicMock(
+        return_value=MagicMock(
+            to_list=AsyncMock(
+                return_value=[{"_id": "delivered", "n": 1}, {"_id": "read", "n": 1}]
+            )
+        )
+    )
+    blasts_coll = MagicMock()
+    blasts_coll.find_one = AsyncMock(return_value=blast)
+    blasts_coll.update_one = AsyncMock()
+    db = _db_with_messages(messages_coll, recipients_coll)
+    db.blast_campaigns = blasts_coll
+
+    with (
+        patch("app.routes.webhook.twilio_service.validate_signature", return_value=True),
+        patch("app.services.status_callback.get_db", return_value=db),
+        patch("app.services.status_callback._publish_best_effort"),
+    ):
+        res = client.post(
+            "/api/webhook/twilio/status",
+            data={"MessageSid": "SMallok", "MessageStatus": "delivered"},
+        )
+
+    assert res.status_code == 200
+    set_fields = blasts_coll.update_one.await_args[0][1]["$set"]
+    assert set_fields["sent_count"] == 2
+    assert set_fields["failed_count"] == 0
+    assert set_fields["status"] == "completed"
+
+
+def test_blast_open_recipients_do_not_force_terminal(client):
+    """While other recipients are still pending, do not finalize to failed/completed."""
+    rid = ObjectId()
+    bid = ObjectId()
+    user_id = str(ObjectId())
+    recipient = {
+        "_id": rid,
+        "blast_id": str(bid),
+        "status": "sent",
+        "twilio_sid": "SMopen",
+    }
+    blast = {
+        "_id": bid,
+        "user_id": user_id,
+        "sent_count": 1,
+        "failed_count": 0,
+        "status": "sending",
+        "total_recipients": 2,
+    }
+    messages_coll = MagicMock()
+    messages_coll.find = _empty_find()
+    recipients_coll = MagicMock()
+    recipients_coll.find = MagicMock(
+        return_value=MagicMock(to_list=AsyncMock(return_value=[recipient]))
+    )
+    recipients_coll.update_one = AsyncMock()
+    recipients_coll.aggregate = MagicMock(
+        return_value=MagicMock(
+            to_list=AsyncMock(
+                return_value=[{"_id": "failed", "n": 1}, {"_id": "pending", "n": 1}]
+            )
+        )
+    )
+    blasts_coll = MagicMock()
+    blasts_coll.find_one = AsyncMock(return_value=blast)
+    blasts_coll.update_one = AsyncMock()
+    db = _db_with_messages(messages_coll, recipients_coll)
+    db.blast_campaigns = blasts_coll
+
+    with (
+        patch("app.routes.webhook.twilio_service.validate_signature", return_value=True),
+        patch("app.services.status_callback.get_db", return_value=db),
+        patch("app.services.status_callback._publish_best_effort"),
+    ):
+        res = client.post(
+            "/api/webhook/twilio/status",
+            data={"MessageSid": "SMopen", "MessageStatus": "failed"},
+        )
+
+    assert res.status_code == 200
+    set_fields = blasts_coll.update_one.await_args[0][1]["$set"]
+    assert set_fields["sent_count"] == 0
+    assert set_fields["failed_count"] == 1
+    assert "status" not in set_fields
 
 
 def test_duplicate_failure_does_not_double_count(client):
@@ -299,8 +589,59 @@ def test_duplicate_failure_does_not_double_count(client):
         "twilio_sid": "SMdup",
         "failed_at": utcnow(),
     }
-    blast = {"_id": bid, "user_id": str(ObjectId()), "failed_count": 1, "status": "completed"}
+    blast = {"_id": bid, "user_id": str(ObjectId()), "failed_count": 1, "status": "failed"}
 
+    messages_coll = MagicMock()
+    messages_coll.find = _empty_find()
+    recipients_coll = MagicMock()
+    recipients_coll.find = MagicMock(
+        return_value=MagicMock(to_list=AsyncMock(return_value=[recipient]))
+    )
+    recipients_coll.update_one = AsyncMock()
+    recipients_coll.aggregate = MagicMock(
+        return_value=MagicMock(to_list=AsyncMock(return_value=[{"_id": "failed", "n": 1}]))
+    )
+    db = _db_with_messages(messages_coll, recipients_coll)
+    db.blast_campaigns = MagicMock(
+        find_one=AsyncMock(return_value=blast),
+        update_one=AsyncMock(),
+    )
+
+    with (
+        patch("app.routes.webhook.twilio_service.validate_signature", return_value=True),
+        patch("app.services.status_callback.get_db", return_value=db),
+        patch("app.services.status_callback._publish_best_effort"),
+    ):
+        res = client.post(
+            "/api/webhook/twilio/status",
+            data={"MessageSid": "SMdup", "MessageStatus": "failed"},
+        )
+
+    assert res.status_code == 200
+    # Monotonic noop — recipient not updated, so blast must not be rewritten.
+    assert db.blast_recipients.update_one.await_count == 0
+    assert db.blast_campaigns.update_one.await_count == 0
+
+
+def test_out_of_order_delivered_after_read_does_not_corrupt(client):
+    rid = ObjectId()
+    bid = ObjectId()
+    user_id = str(ObjectId())
+    recipient = {
+        "_id": rid,
+        "blast_id": str(bid),
+        "status": "read",
+        "twilio_sid": "SMoo",
+        "read_at": utcnow(),
+    }
+    blast = {
+        "_id": bid,
+        "user_id": user_id,
+        "sent_count": 1,
+        "failed_count": 0,
+        "status": "completed",
+        "total_recipients": 1,
+    }
     messages_coll = MagicMock()
     messages_coll.find = _empty_find()
     recipients_coll = MagicMock()
@@ -321,7 +662,7 @@ def test_duplicate_failure_does_not_double_count(client):
     ):
         res = client.post(
             "/api/webhook/twilio/status",
-            data={"MessageSid": "SMdup", "MessageStatus": "failed"},
+            data={"MessageSid": "SMoo", "MessageStatus": "delivered"},
         )
 
     assert res.status_code == 200

@@ -782,8 +782,11 @@ def _finalize_db(agg_rows, *, status="sending", total=None):
             counts.get(s, 0)
             for s in ("sent", "delivered", "read", "queued", "accepted", "sending")
         ),
-        "failed_count": counts.get("failed", 0),
-        "cancelled_count": counts.get("cancelled", 0),
+        "failed_count": counts.get("failed", 0) + counts.get("undelivered", 0),
+        "cancelled_count": counts.get("cancelled", 0) + counts.get("canceled", 0),
+        "delivered_count": counts.get("delivered", 0) + counts.get("read", 0),
+        "read_count": counts.get("read", 0),
+        "undelivered_count": counts.get("undelivered", 0),
     }
     db.blast_campaigns.find_one = MagicMock(return_value=blast_doc)
     db.blast_campaigns.update_one = MagicMock()
@@ -850,6 +853,34 @@ def test_finalize_blast_noop_when_already_terminal():
     with patch.object(tasks, "_publish"):
         tasks._finalize_blast(db, "u1", str(ObjectId()))
     assert _statuses_set(db) == []
+
+
+def test_finalize_blast_failed_when_all_undelivered():
+    """undelivered recipients must count as failures for terminal status."""
+    from app.workers import tasks
+
+    db = _finalize_db([{"_id": "undelivered", "n": 2}], total=2)
+    with patch.object(tasks, "_publish"):
+        tasks._finalize_blast(db, "u1", str(ObjectId()))
+    assert "failed" in _statuses_set(db)
+    set_calls = [
+        c.args[1]["$set"]
+        for c in db.blast_campaigns.update_one.call_args_list
+        if "failed_count" in c.args[1].get("$set", {})
+    ]
+    assert set_calls
+    assert set_calls[0]["failed_count"] == 2
+    assert set_calls[0]["sent_count"] == 0
+
+
+def test_finalize_blast_recomputes_when_previously_completed():
+    """Late delivery failures must be allowed to move completed → failed."""
+    from app.workers import tasks
+
+    db = _finalize_db([{"_id": "failed", "n": 1}], status="completed", total=1)
+    with patch.object(tasks, "_publish"):
+        tasks._finalize_blast(db, "u1", str(ObjectId()))
+    assert "failed" in _statuses_set(db)
 
 
 def test_send_blast_messages_noop_when_paused():
