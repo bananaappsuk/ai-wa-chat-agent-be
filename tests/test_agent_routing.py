@@ -155,3 +155,84 @@ def test_no_match_but_default_set_uses_default_not_generic():
             db, "u", {"_id": ObjectId()}, message_text="random question"
         )
     assert out["name"] == "General"
+
+
+# --- Sticky expiry: an automatic assignment only holds while the conversation is live ----
+
+from datetime import datetime, timedelta, timezone
+
+
+def _db_with_history(agents, prev_msg):
+    """messages.find_one → [latest inbound (now), message before it (prev_msg)]."""
+    db = _db(agents)
+    now = datetime.now(timezone.utc)
+    db.messages.find_one = MagicMock(
+        side_effect=[{"direction": "inbound", "created_at": now, "message": "x"}, prev_msg]
+    )
+    return db
+
+
+def _ago(**kw):
+    return datetime.now(timezone.utc) - timedelta(**kw)
+
+
+def test_live_auto_assignment_still_sticks():
+    train = _agent("Train")
+    food = _agent("Food", keywords=["pizza"])
+    db = _db_with_history([train, food], {"direction": "outbound", "created_at": _ago(hours=2)})
+    lead = {"_id": ObjectId(), "assigned_agent_id": str(train["_id"]), "assigned_agent_source": "auto"}
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="I want a pizza")
+    assert out["name"] == "Train"
+
+
+def test_stale_auto_assignment_is_rerouted_and_repersisted():
+    train = _agent("Train")
+    food = _agent("Food", keywords=["pizza"])
+    db = _db_with_history([train, food], {"direction": "inbound", "created_at": _ago(days=18)})
+    lead = {"_id": ObjectId(), "assigned_agent_id": str(train["_id"]), "assigned_agent_source": "auto"}
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="I want a pizza")
+    assert out["name"] == "Food"
+    set_doc = db.leads.update_one.call_args[0][1]["$set"]
+    assert set_doc == {"assigned_agent_id": str(food["_id"]), "assigned_agent_source": "auto"}
+
+
+def test_manual_pin_never_expires():
+    train = _agent("Train")
+    food = _agent("Food", keywords=["pizza"])
+    db = _db_with_history([train, food], {"direction": "inbound", "created_at": _ago(days=30)})
+    lead = {"_id": ObjectId(), "assigned_agent_id": str(train["_id"]), "assigned_agent_source": "manual"}
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="I want a pizza")
+    assert out["name"] == "Train"
+    db.leads.update_one.assert_not_called()
+
+
+def test_late_reply_to_campaign_stays_with_campaign_agent():
+    camp = _agent("Workshop")
+    food = _agent("Food", keywords=["pizza"])
+    prev = {"direction": "outbound", "message_purpose": "campaign", "campaign_id": "c1", "created_at": _ago(days=3)}
+    db = _db_with_history([camp, food], prev)
+    lead = {"_id": ObjectId(), "assigned_agent_id": str(camp["_id"]), "assigned_agent_source": "campaign"}
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="pizza? no — tell me more")
+    assert out["name"] == "Workshop"
+
+
+def test_stale_assignment_with_no_match_goes_generic_and_is_cleared():
+    train = _agent("Train", keywords=["train"])
+    food = _agent("Food", keywords=["pizza"])
+    db = _db_with_history([train, food], {"direction": "inbound", "created_at": _ago(days=18)})
+    lead = {"_id": ObjectId(), "assigned_agent_id": str(train["_id"]), "assigned_agent_source": "auto"}
+    with patch.object(agent_router, "_llm_pick", return_value=None):
+        out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="Hey hi how are you")
+    assert out is None
+    update = db.leads.update_one.call_args[0][1]
+    assert update == {"$unset": {"assigned_agent_id": "", "assigned_agent_source": ""}}
+
+
+def test_sticky_expiry_disabled_when_window_zero():
+    train = _agent("Train")
+    food = _agent("Food", keywords=["pizza"])
+    db = _db_with_history([train, food], {"direction": "inbound", "created_at": _ago(days=90)})
+    lead = {"_id": ObjectId(), "assigned_agent_id": str(train["_id"])}
+    with patch.object(agent_router.settings, "AGENT_STICKY_WINDOW_HOURS", 0):
+        out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="I want a pizza")
+    assert out["name"] == "Train"

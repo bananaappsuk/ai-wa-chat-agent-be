@@ -16,6 +16,7 @@ from app.workers import campaign_tasks
 logger = logging.getLogger("app.scheduler")
 _STOP = False
 _OWNER = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+KB_REFRESH_CHECK_SECONDS = 600  # look for due knowledge-base refreshes every 10 minutes
 
 
 def _handle_signal(signum, frame):  # noqa: ARG001
@@ -68,6 +69,7 @@ def run_forever() -> None:
 
     r = get_redis()
     interval = max(15, int(settings.SCHEDULER_INTERVAL_SECONDS))
+    last_kb_refresh = 0.0
     logger.info("scheduler starting owner=%s interval=%ss", _OWNER, interval)
 
     while not _STOP:
@@ -78,6 +80,11 @@ def run_forever() -> None:
                 continue
             enqueue(campaign_tasks.process_due_scheduled_campaigns)
             logger.info("enqueued process_due_scheduled_campaigns")
+            if time.monotonic() - last_kb_refresh >= KB_REFRESH_CHECK_SECONDS:
+                from app.workers import kb_tasks
+
+                enqueue(kb_tasks.refresh_due_kb_sources)
+                last_kb_refresh = time.monotonic()
             try:
                 from app.services.reconciliation import reconcile_stale_messages
 

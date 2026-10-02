@@ -33,6 +33,19 @@ class AgentCreate(BaseModel):
     # Per-agent identity override so multiple agents feel distinct (falls back to the
     # tenant-level ai_business_description when unset).
     business_description: Optional[str] = Field(default=None, max_length=2000)
+    # Knowledge bases this agent answers from (retrieval). When set, they replace the
+    # legacy pasted `knowledge_base` text in the prompt.
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("knowledge_base_ids", mode="before")
+    @classmethod
+    def _clean_kb_ids(cls, v):
+        out: list[str] = []
+        for x in v or []:
+            s = str(x).strip()
+            if s and s not in out:
+                out.append(s)
+        return out[:10]
 
     @field_validator("routing_keywords", mode="before")
     @classmethod

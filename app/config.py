@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     AI_ANALYTICS_ENABLED: bool = True
     AI_MAX_CONTEXT_MESSAGES: int = 20
     AI_MAX_CONTEXT_CHARS: int = 12000
+    # A gap longer than this between messages starts a new conversation: AI replies only
+    # see the current one (0 = no cut). A business-initiated message the customer is
+    # replying to is kept even across the gap.
+    AI_CONTEXT_SESSION_GAP_HOURS: float = 24
+    # An automatic agent assignment sticks only while the conversation is live — previous
+    # message within this many hours (0 = never expires). Manual picks never expire.
+    AGENT_STICKY_WINDOW_HOURS: float = 24
     AI_DAILY_TOKEN_LIMIT_PER_TENANT: int = 200000
     AI_MONTHLY_COST_LIMIT_PER_TENANT: float = 50.0
     AI_MAX_REQUESTS_PER_MINUTE_PER_TENANT: int = 30
@@ -106,8 +113,36 @@ class Settings(BaseSettings):
         '{"gpt-4o-mini":{"input_per_1m":0.15,"output_per_1m":0.60},'
         '"gpt-4o":{"input_per_1m":2.50,"output_per_1m":10.0},'
         '"gpt-4.1-mini":{"input_per_1m":0.40,"output_per_1m":1.60},'
-        '"gpt-4.1":{"input_per_1m":2.0,"output_per_1m":8.0}}'
+        '"gpt-4.1":{"input_per_1m":2.0,"output_per_1m":8.0},'
+        '"text-embedding-3-small":{"input_per_1m":0.02,"output_per_1m":0}}'
     )
+    # --- Knowledge base (retrieval) ---
+    # Sized for the free Atlas tier: one vector index, compact float32 vectors, capped chunks.
+    KB_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    KB_EMBEDDING_DIMS: int = 512
+    KB_VECTOR_INDEX_NAME: str = "kb_chunks_vector"
+    KB_CHUNK_TARGET_CHARS: int = 1500
+    KB_CHUNK_MAX_CHARS: int = 2000
+    KB_CHUNK_OVERLAP_CHARS: int = 200
+    KB_DEFAULT_CHUNKS_TO_RETRIEVE: int = 3
+    KB_DEFAULT_SIMILARITY_THRESHOLD: float = 0.72  # calibrated on real data: relevant ≥0.79, off-topic ≤0.69
+    KB_MAX_SOURCES_PER_KB: int = 100
+    KB_MAX_FILE_MB: int = 20
+    KB_MAX_TABLE_ROWS: int = 1000
+    KB_MAX_TABLE_COLS: int = 50
+    KB_CRAWL_DEFAULT_MAX_PAGES: int = 50
+    KB_CRAWL_MAX_PAGES: int = 200
+    KB_CRAWL_MAX_DEPTH: int = 5
+    KB_CRAWL_DELAY_SECONDS: float = 0.5
+    KB_CRAWL_TIME_BUDGET_SECONDS: int = 900
+    KB_FETCH_TIMEOUT_SECONDS: float = 15
+    KB_FETCH_MAX_BYTES: int = 10_000_000
+    KB_REFRESH_HOURS: int = 24
+    KB_INGEST_JOB_TIMEOUT_SECONDS: int = 1800
+    # When Atlas Vector Search isn't available (local Mongo, tests) retrieval scores
+    # chunks in Python instead, over at most this many chunks.
+    KB_FALLBACK_MAX_CHUNKS: int = 5000
+    KB_USER_AGENT: str = "AIChatKnowledgeBot/1.0 (+https://ai-wa-chat-agent-fe.vercel.app)"
     AI_FAILURE_FALLBACK_ENABLED: bool = True
     AI_FAILURE_FALLBACK_TEXT: str = (
         "Thanks for your message — a team member will follow up with you shortly."

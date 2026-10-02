@@ -1,0 +1,204 @@
+"""Reply-time retrieval.
+
+1. Skip pure small talk ("hi", "thanks") — nothing to look up.
+2. Turn the conversation into a standalone search query (only when there's earlier context).
+3. Vector search over this tenant's chunks in the agent's knowledge bases (Atlas
+   $vectorSearch; in-process cosine when Atlas Search isn't available).
+4. Keep the top-k hits at or above the similarity threshold.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Optional
+
+from bson import ObjectId
+
+from app.config import settings
+from app.services.kb.embed import EmbeddingError, cosine_score, embed_texts, pack, unpack
+
+logger = logging.getLogger(__name__)
+
+# A message is small talk only if EVERY word is a greeting / pleasantry word — so "hey hi
+# how are you" is, but "hi, how much is the course" isn't.
+_SMALL_TALK_WORDS = frozenset(
+    "hi hii hiii hello helo hey heyy hiya yo hai hola good morning afternoon evening night day "
+    "thanks thank thankyou thx ty cheers you u ok okay k cool great nice awesome bye goodbye see ya "
+    "later how are r doing is it going what's whats up sup i'm im am fine well there all everyone "
+    "dear sir madam mate bro buddy and".split()
+)
+
+
+@dataclass
+class Hit:
+    chunk_id: str
+    score: float
+    text: str
+    heading: str
+    title: str
+    url: str
+    source_id: str
+    kb_id: str
+
+
+@dataclass
+class KBContext:
+    """What retrieval found for one reply. `searched` is False when we deliberately skipped
+    (small talk / no knowledge bases) — the prompt then adds nothing."""
+
+    kb_ids: list[str]
+    query: str = ""
+    searched: bool = False
+    hits: list[Hit] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+def is_small_talk(text: str) -> bool:
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    return 0 < len(words) <= 8 and all(w in _SMALL_TALK_WORDS for w in words)
+
+
+def kb_settings(db, user_id: str, kb_ids: list[str]) -> tuple[int, float, list[str]]:
+    """Resolve k / threshold across an agent's KBs and drop ids the tenant doesn't own."""
+    oids = [ObjectId(k) for k in kb_ids if ObjectId.is_valid(k)]
+    kbs = list(db.knowledge_bases.find({"_id": {"$in": oids}, "user_id": user_id}))
+    if not kbs:
+        return 0, 1.0, []
+    k = max(int(kb.get("chunks_to_retrieve") or settings.KB_DEFAULT_CHUNKS_TO_RETRIEVE) for kb in kbs)
+    threshold = min(float(kb.get("similarity_threshold") or settings.KB_DEFAULT_SIMILARITY_THRESHOLD) for kb in kbs)
+    return max(1, min(10, k)), max(0.0, min(1.0, threshold)), [str(kb["_id"]) for kb in kbs]
+
+
+def standalone_query(history: list[dict], *, tenant_id: Optional[str] = None) -> str:
+    """The customer's latest message, rewritten to stand alone when earlier turns matter."""
+    user_turns = [m.get("content") or "" for m in history if m.get("role") == "user"]
+    latest = (user_turns[-1] if user_turns else "").strip()
+    if len(user_turns) < 2 or len(history) < 2:
+        return latest
+    convo = "\n".join(f"{m.get('role')}: {(m.get('content') or '')[:500]}" for m in history[-6:])
+    try:
+        from app.services.ai_provider import chat_completion
+
+        res = chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Rewrite the customer's LAST message as one standalone search query for a "
+                        "business knowledge base, resolving references like 'it', 'that course', "
+                        "'how much'. Output only the query, no quotes."
+                    ),
+                },
+                {"role": "user", "content": convo},
+            ],
+            model="gpt-4o-mini",
+            temperature=0.0,
+            max_tokens=60,
+            tenant_id=tenant_id,
+            operation="kb_query_rewrite",
+        )
+        q = (res.text or "").strip().strip('"') if getattr(res, "success", False) else ""
+        return q[:500] or latest
+    except Exception:
+        return latest
+
+
+def _vector_search(db, user_id: str, kb_ids: list[str], vector: list[float], k: int) -> list[dict]:
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": settings.KB_VECTOR_INDEX_NAME,
+                "path": "embedding",
+                "queryVector": pack(vector),
+                "numCandidates": min(500, max(50, k * 20)),
+                "limit": k * 2,
+                "filter": {"user_id": user_id, "kb_id": {"$in": kb_ids}},
+            }
+        },
+        {"$project": {"embedding": 0, "score": {"$meta": "vectorSearchScore"}}},
+    ]
+    return list(db.kb_chunks.aggregate(pipeline))
+
+
+def _scan(db, user_id: str, kb_ids: list[str], vector: list[float], k: int) -> list[dict]:
+    rows = db.kb_chunks.find({"user_id": user_id, "kb_id": {"$in": kb_ids}}).limit(int(settings.KB_FALLBACK_MAX_CHUNKS))
+    scored = []
+    for r in rows:
+        try:
+            r["score"] = cosine_score(vector, unpack(r.get("embedding")))
+        except ValueError:
+            continue
+        r.pop("embedding", None)
+        scored.append(r)
+    scored.sort(key=lambda r: r["score"], reverse=True)
+    return scored[: k * 2]
+
+
+def search(
+    db,
+    *,
+    user_id: str,
+    kb_ids: list[str],
+    query: str,
+    k: int,
+    threshold: float,
+    tenant_id_for_usage: Optional[str] = None,
+) -> list[Hit]:
+    if not query.strip() or not kb_ids:
+        return []
+    vector = embed_texts([query], tenant_id=tenant_id_for_usage or user_id, operation="kb_query")[0]
+    from pymongo.errors import PyMongoError
+
+    try:
+        rows = _vector_search(db, user_id, kb_ids, vector, k)
+    except (PyMongoError, NotImplementedError) as exc:  # no Atlas Search (local Mongo / mongomock)
+        logger.debug("kb: $vectorSearch unavailable (%s) — scanning", type(exc).__name__)
+        rows = _scan(db, user_id, kb_ids, vector, k)
+    hits: list[Hit] = []
+    seen: set[str] = set()
+    for r in rows:
+        score = float(r.get("score") or 0)
+        text = r.get("text") or ""
+        sig = text[:200]
+        if score < threshold or sig in seen:
+            continue
+        seen.add(sig)
+        hits.append(
+            Hit(
+                chunk_id=str(r.get("_id")),
+                score=round(score, 4),
+                text=text,
+                heading=r.get("heading") or "",
+                title=r.get("title") or "",
+                url=r.get("url") or "",
+                source_id=str(r.get("source_id") or ""),
+                kb_id=str(r.get("kb_id") or ""),
+            )
+        )
+        if len(hits) >= k:
+            break
+    return hits
+
+
+def retrieve_for_reply(db, *, user_id: str, agent: Optional[dict], history: list[dict]) -> Optional[KBContext]:
+    """Knowledge for an agent reply. None when the agent has no knowledge bases (callers then
+    fall back to the agent's legacy knowledge text)."""
+    kb_ids = [str(x) for x in ((agent or {}).get("knowledge_base_ids") or []) if x]
+    if not kb_ids:
+        return None
+    k, threshold, owned = kb_settings(db, user_id, kb_ids)
+    ctx = KBContext(kb_ids=owned)
+    if not owned:
+        return ctx
+    latest = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
+    if is_small_talk(latest):
+        return ctx
+    ctx.query = standalone_query(history, tenant_id=user_id)
+    try:
+        ctx.hits = search(db, user_id=user_id, kb_ids=owned, query=ctx.query, k=k, threshold=threshold)
+        ctx.searched = True
+    except EmbeddingError as exc:
+        ctx.error = str(exc)
+        logger.warning("kb retrieval failed user_id=%s err=%s", user_id, exc)
+    return ctx

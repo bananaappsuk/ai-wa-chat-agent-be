@@ -1,10 +1,45 @@
 """Tenant-safe conversation context loading and token estimation."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from app.config import settings
 from app.services.ai_config import sanitize_text
+
+# Messages the business started (campaigns, marketing/utility templates). A customer reply
+# to one of these belongs to it however late it arrives.
+BUSINESS_INITIATED_PURPOSES = frozenset({"campaign", "marketing", "transactional"})
+
+
+def is_business_initiated(doc: Optional[dict]) -> bool:
+    if not doc or doc.get("direction") == "inbound":
+        return False
+    return bool(doc.get("campaign_id")) or (doc.get("message_purpose") in BUSINESS_INITIATED_PURPOSES)
+
+
+def _as_utc(dt) -> Optional[datetime]:
+    if not isinstance(dt, datetime):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def current_session(raw: list[dict], gap_hours: Optional[float]) -> list[dict]:
+    """Trim oldest→newest messages to the current conversation: cut at the latest gap
+    longer than `gap_hours`. If the customer is replying late to a business-initiated
+    message, that message is kept (it's what they're answering) and the cut is just above it."""
+    if not gap_hours or float(gap_hours) <= 0 or len(raw) < 2:
+        return raw
+    gap = timedelta(hours=float(gap_hours))
+    for i in range(len(raw) - 1, 0, -1):
+        newer, older = raw[i], raw[i - 1]
+        t_new, t_old = _as_utc(newer.get("created_at")), _as_utc(older.get("created_at"))
+        if t_new is None or t_old is None or t_new - t_old <= gap:
+            continue
+        if newer.get("direction") == "inbound" and is_business_initiated(older):
+            return raw[i - 1 :]
+        return raw[i:]
+    return raw
 
 
 def estimate_tokens(text: str) -> int:
@@ -31,8 +66,10 @@ def load_conversation_context(
     summary: Optional[str] = None,
     max_messages: Optional[int] = None,
     max_chars: Optional[int] = None,
+    session_gap_hours: Optional[float] = None,
 ) -> dict[str, Any]:
-    """Load recent messages for AI. Tenant + lead scoped only."""
+    """Load recent messages for AI. Tenant + lead scoped only. With `session_gap_hours`,
+    only the current conversation is returned (see `current_session`)."""
     limit = max(1, min(50, int(max_messages or settings.AI_MAX_CONTEXT_MESSAGES or settings.OPENAI_MAX_HISTORY)))
     max_c = max(500, int(max_chars or settings.AI_MAX_CONTEXT_CHARS))
 
@@ -48,7 +85,7 @@ def load_conversation_context(
         .sort("created_at", -1)
         .limit(limit * 2)  # over-fetch then trim by chars
     )
-    raw = list(reversed(list(cur)))
+    raw = current_session(list(reversed(list(cur))), session_gap_hours)
 
     messages: list[dict[str, Any]] = []
     chars = 0

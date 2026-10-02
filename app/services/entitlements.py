@@ -10,6 +10,9 @@ ENFORCED (features that actually exist in the product):
 - ai_conversations_month (count) -> distinct leads that receive an AI auto-reply
                                      per calendar month (a whole back-and-forth thread
                                      counts as ONE conversation)
+- knowledge_bases        (count) -> knowledge-base creation
+- kb_chunks              (count) -> stored knowledge chunks (ingestion stops at the cap;
+                                     caps are sized so all tenants fit the free DB tier)
 - whatsapp_numbers       (count) -> connecting a WhatsApp sender. INTERPRETATION:
       enforced as free-vs-paid only. A limit of 0 (free) cannot connect any sender;
       a paid limit (>=1 or -1) may connect. We deliberately do NOT block a paid tenant
@@ -208,6 +211,8 @@ async def usage_snapshot(db, redis, user: dict) -> dict[str, Any]:
     plan = effective_plan_key(user)
     ent = effective_entitlements(user)
     agents = await db.agents.count_documents({"user_id": uid})
+    kbs = await db.knowledge_bases.count_documents({"user_id": uid})
+    kb_chunks = await db.kb_chunks.count_documents({"user_id": uid})
     return {
         "plan": plan,
         "plan_name": plan_display_name(plan),
@@ -221,6 +226,8 @@ async def usage_snapshot(db, redis, user: dict) -> dict[str, Any]:
                 "used": ai_conversation_count(redis, uid),
                 "limit": ent.get("ai_conversations_month", 0),
             },
+            "knowledge_bases": {"used": kbs, "limit": ent.get("knowledge_bases", 0)},
+            "kb_chunks": {"used": kb_chunks, "limit": ent.get("kb_chunks", 0)},
             "campaigns": {"enabled": bool(ent.get("campaigns"))},
             "whatsapp_broadcast": {"enabled": bool(ent.get("whatsapp_broadcast"))},
         },

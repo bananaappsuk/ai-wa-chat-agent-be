@@ -76,15 +76,25 @@ async def run_bulk_action(
                     # Clear assignment → conversation is auto-routed again.
                     await db.leads.update_one(
                         {"_id": oid, "user_id": user_id},
-                        {"$set": {"updated_at": now}, "$unset": {"assigned_agent_id": ""}},
+                        {
+                            "$set": {"updated_at": now},
+                            "$unset": {"assigned_agent_id": "", "assigned_agent_source": ""},
+                        },
                     )
                 elif len(agent_id) > 64:
                     failed += 1
                     continue
                 else:
+                    # A human pick is a pin: it never expires like automatic routing does.
                     await db.leads.update_one(
                         {"_id": oid, "user_id": user_id},
-                        {"$set": {"assigned_agent_id": agent_id, "updated_at": now}},
+                        {
+                            "$set": {
+                                "assigned_agent_id": agent_id,
+                                "assigned_agent_source": "manual",
+                                "updated_at": now,
+                            }
+                        },
                     )
             elif action == "pause_ai":
                 await db.leads.update_one(

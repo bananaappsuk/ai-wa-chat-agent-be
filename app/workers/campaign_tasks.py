@@ -368,7 +368,10 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
         # agent (AI campaigns carry agent_id), not re-routed to a keyword match / generic.
         camp_agent_id = str(campaign.get("agent_id") or "").strip()
         if lead and camp_agent_id and str(lead.get("assigned_agent_id") or "") != camp_agent_id:
-            db.leads.update_one({"_id": lead["_id"]}, {"$set": {"assigned_agent_id": camp_agent_id}})
+            db.leads.update_one(
+                {"_id": lead["_id"]},
+                {"$set": {"assigned_agent_id": camp_agent_id, "assigned_agent_source": "campaign"}},
+            )
             lead["assigned_agent_id"] = camp_agent_id
 
         content_sid = campaign.get("content_sid")

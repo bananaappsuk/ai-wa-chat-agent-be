@@ -250,4 +250,9 @@ async def init_indexes() -> None:
     await db.stripe_webhook_events.create_index("processed_at")
     await db.stripe_webhook_events.create_index([("status", 1), ("processing_started_at", 1)])
 
+    # Knowledge base
+    from app.services.kb.store import init_kb_indexes
+
+    await init_kb_indexes(db)
+
     logger.info("MongoDB indexes ensured")

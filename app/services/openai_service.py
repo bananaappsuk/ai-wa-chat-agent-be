@@ -31,6 +31,7 @@ def generate_reply(
     summary: Optional[str] = None,
     user: Optional[dict] = None,
     neutral: bool = False,
+    kb_context=None,
 ) -> str:
     ai = ai_settings or resolve_ai_settings(user)
     if not ai.get("enabled"):
@@ -45,6 +46,7 @@ def generate_reply(
         language=(lead or {}).get("language") or ai.get("default_language"),
         message_purpose="support",
         neutral=neutral,
+        kb_context=kb_context,
     )
     ctx_msgs = []
     for m in history[-int(settings.AI_MAX_CONTEXT_MESSAGES or settings.OPENAI_MAX_HISTORY) :]:

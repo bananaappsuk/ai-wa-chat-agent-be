@@ -594,6 +594,53 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
             logger.exception("record_activity_sync failed for welcome send")
 
 
+def _retrieve_knowledge(db, user_id: str, lead_id: str, agent: Optional[dict], history: list[dict], trigger_id):
+    """Knowledge-base lookup for this reply. Never raises — a lookup problem must not stop
+    the reply. Records a trace (which chunks were used) and unanswered questions."""
+    if not agent:
+        return None
+    try:
+        from app.services.kb.retrieve import retrieve_for_reply
+
+        ctx = retrieve_for_reply(db, user_id=user_id, agent=agent, history=history)
+    except Exception:
+        logger.exception("kb retrieval crashed user_id=%s lead_id=%s", user_id, lead_id)
+        return None
+    if ctx is None or not ctx.searched:
+        return ctx
+    now = datetime.now(timezone.utc)
+    try:
+        db.ai_events.insert_one(
+            {
+                "tenant_id": user_id,
+                "event_type": "kb_retrieval",
+                "conversation_id": lead_id,
+                "trigger_message_id": str(trigger_id) if trigger_id else None,
+                "agent_id": str(agent.get("_id")),
+                "query": ctx.query[:500],
+                "hits": [{"chunk_id": h.chunk_id, "score": h.score, "title": h.title, "url": h.url} for h in ctx.hits],
+                "created_at": now,
+            }
+        )
+        if not ctx.hits:
+            question = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
+            db.kb_gaps.insert_one(
+                {
+                    "user_id": user_id,
+                    "agent_id": str(agent.get("_id")),
+                    "agent_name": agent.get("name"),
+                    "kb_ids": ctx.kb_ids,
+                    "lead_id": lead_id,
+                    "question": question[:1000],
+                    "query": ctx.query[:500],
+                    "created_at": now,
+                }
+            )
+    except Exception:
+        logger.debug("kb trace write failed", exc_info=True)
+    return ctx
+
+
 def generate_and_send_ai_reply(
     user_id: str,
     lead_id: str,
@@ -748,12 +795,17 @@ def generate_and_send_ai_reply(
     summary_doc = get_summary(db, tenant_id=user_id, lead_id=lead_id)
     summary_text = (summary_doc or {}).get("summary")
     ctx = load_conversation_context(
-        db, tenant_id=user_id, lead_id=lead_id, summary=summary_text
+        db,
+        tenant_id=user_id,
+        lead_id=lead_id,
+        summary=summary_text,
+        session_gap_hours=settings.AI_CONTEXT_SESSION_GAP_HOURS,
     )
     history = [
         {"role": m["role"], "content": m["content"], "direction": "inbound" if m["role"] == "user" else "outbound", "message": m["content"]}
         for m in ctx["messages"]
     ]
+    kb_ctx = _retrieve_knowledge(db, user_id, lead_id, agent, history, trigger_id)
 
     fallback_sent_key = f"ai:fallback_sent:{user_id}:{lead_id}"
     try:
@@ -767,6 +819,7 @@ def generate_and_send_ai_reply(
             summary=summary_text if ctx.get("summary_used") else summary_text,
             user=user,
             neutral=agent is None,
+            kb_context=kb_ctx,
         )
     except Exception as exc:
         logger.exception(

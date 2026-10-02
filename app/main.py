@@ -34,6 +34,7 @@ from app.routes import (
     conversations,
     analytics,
     billing,
+    knowledge,
 )
 from app.observability import metrics as metrics_route
 from app.workers.queue import close_redis, get_redis
@@ -59,6 +60,8 @@ async def lifespan(app: FastAPI):
         # Stay up in non-prod so /ready can report unhealthy; fail hard in production-like
         if settings.is_production_like:
             raise
+    # Atlas vector index for the knowledge base (no-op when present; off the event loop).
+    asyncio.get_running_loop().run_in_executor(None, _ensure_kb_vector_index)
 
     task = asyncio.create_task(ws_route.redis_pubsub_loop())
     sched = None
@@ -86,15 +89,30 @@ async def lifespan(app: FastAPI):
         logger.info("API shutdown complete")
 
 
+def _ensure_kb_vector_index() -> None:
+    try:
+        from app.services.kb.store import ensure_vector_index
+        from app.workers.tasks import _db
+
+        ensure_vector_index(_db())
+    except Exception:
+        logger.exception("kb vector index check failed")
+
+
 async def _scheduled_campaigns_loop() -> None:
     """Enqueue due scheduled campaigns about once a minute (single-process only)."""
     from app.workers.queue import enqueue
-    from app.workers import campaign_tasks
+    from app.workers import campaign_tasks, kb_tasks
 
+    loop = asyncio.get_running_loop()
+    last_kb_refresh = 0.0
     while True:
         try:
             await asyncio.sleep(max(15, int(settings.SCHEDULER_INTERVAL_SECONDS)))
             enqueue(campaign_tasks.process_due_scheduled_campaigns)
+            if loop.time() - last_kb_refresh >= 600:  # knowledge-base auto-refresh check
+                enqueue(kb_tasks.refresh_due_kb_sources)
+                last_kb_refresh = loop.time()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -183,6 +201,7 @@ app.include_router(notifications.router, prefix=api_prefix)
 app.include_router(conversations.router, prefix=api_prefix)
 app.include_router(analytics.router, prefix=api_prefix)
 app.include_router(billing.router, prefix=api_prefix)
+app.include_router(knowledge.router, prefix=api_prefix)
 app.include_router(ws_route.router)
 app.include_router(metrics_route.router)
 

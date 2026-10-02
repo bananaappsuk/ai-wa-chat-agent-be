@@ -3,7 +3,10 @@
 Decides WHICH of a tenant's active agents handles an inbound message, and makes the
 choice sticky per conversation. Order of resolution:
 
-  1. Sticky      — lead.assigned_agent_id, if still an active agent for this tenant.
+  1. Sticky      — lead.assigned_agent_id, if still an active agent for this tenant AND
+                   the conversation is still live (previous message within
+                   AGENT_STICKY_WINDOW_HOURS). A manual "Handled by" pick never expires.
+                   A stale automatic assignment is re-decided from the new message.
   2. Single      — only one active agent → use it.
   3. Keyword     — inbound text matches an agent's routing_keywords (best score wins).
   4. LLM router  — classify against agent name/description (only when >1 candidate and
@@ -20,11 +23,52 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from bson import ObjectId
 
+from app.config import settings
+from app.services.ai_context import is_business_initiated
+
 logger = logging.getLogger(__name__)
+
+
+def _as_utc(dt) -> Optional[datetime]:
+    if not isinstance(dt, datetime):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _previous_message(db, user_id: str, lead_id: str) -> Optional[dict]:
+    """The message just BEFORE the inbound one being handled now."""
+    latest_in = db.messages.find_one(
+        {"user_id": user_id, "lead_id": lead_id, "direction": "inbound"},
+        sort=[("created_at", -1)],
+    )
+    q: dict = {"user_id": user_id, "lead_id": lead_id}
+    latest_at = (latest_in or {}).get("created_at")
+    if latest_at is not None:
+        q["created_at"] = {"$lt": latest_at}
+    return db.messages.find_one(q, sort=[("created_at", -1)])
+
+
+def _assignment_is_live(db, user_id: str, lead: dict) -> bool:
+    """Sticky only while the conversation is live. Manual picks never expire; a reply to a
+    business-initiated message (campaign/template) stays with its agent however late; with
+    no earlier activity to judge by (e.g. a fresh campaign assignment) the pick is honoured."""
+    if lead.get("assigned_agent_source") == "manual":
+        return True
+    window = float(settings.AGENT_STICKY_WINDOW_HOURS or 0)
+    if window <= 0:
+        return True
+    prev = _previous_message(db, user_id, str(lead.get("_id")))
+    prev_at = _as_utc((prev or {}).get("created_at"))
+    if prev_at is None:
+        return True
+    if is_business_initiated(prev):
+        return True
+    return datetime.now(timezone.utc) - prev_at <= timedelta(hours=window)
 
 
 def _active_agents(db, user_id: str) -> list[dict]:
@@ -116,10 +160,20 @@ def _persist(db, lead_id: str, agent: dict) -> None:
     try:
         db.leads.update_one(
             {"_id": ObjectId(lead_id)},
-            {"$set": {"assigned_agent_id": str(agent["_id"])}},
+            {"$set": {"assigned_agent_id": str(agent["_id"]), "assigned_agent_source": "auto"}},
         )
     except Exception:
         logger.debug("failed to persist assigned_agent_id", exc_info=True)
+
+
+def _clear(db, lead_id: str) -> None:
+    try:
+        db.leads.update_one(
+            {"_id": ObjectId(lead_id)},
+            {"$unset": {"assigned_agent_id": "", "assigned_agent_source": ""}},
+        )
+    except Exception:
+        logger.debug("failed to clear assigned_agent_id", exc_info=True)
 
 
 def select_agent_for_inbound(
@@ -136,10 +190,14 @@ def select_agent_for_inbound(
 
     by_id = {str(a["_id"]): a for a in agents}
 
-    # 1. Sticky — keep the conversation with its agent.
-    assigned = (lead.get("assigned_agent_id") or "").strip()
+    # 1. Sticky — keep a live conversation with its agent. A stale automatic assignment
+    #    (conversation went quiet) is re-decided from the new message below.
+    assigned = str(lead.get("assigned_agent_id") or "").strip()
+    stale = False
     if assigned and assigned in by_id:
-        return by_id[assigned]
+        if _assignment_is_live(db, user_id, lead):
+            return by_id[assigned]
+        stale = True
 
     # 2. Single active agent.
     if len(agents) == 1:
@@ -168,4 +226,7 @@ def select_agent_for_inbound(
 
     # 6. No match and no default → generic LLM reply (agent=None). Deliberately NOT
     #    persisted, so a later on-topic message can still route to a matching agent.
+    #    A stale assignment is cleared so it can't re-stick on the next message.
+    if stale:
+        _clear(db, lead_id)
     return None

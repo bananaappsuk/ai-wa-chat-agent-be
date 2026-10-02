@@ -10,6 +10,16 @@ from app.services.knowledge_extract import extract_knowledge_text
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
+async def _check_kb_ids(user_id: str, kb_ids: list[str] | None) -> None:
+    """Agents may only use the tenant's own knowledge bases."""
+    if not kb_ids:
+        return
+    oids = [ObjectId(k) for k in kb_ids if ObjectId.is_valid(k)]
+    owned = await get_db().knowledge_bases.count_documents({"_id": {"$in": oids}, "user_id": user_id})
+    if len(oids) != len(kb_ids) or owned != len(oids):
+        raise HTTPException(status_code=400, detail="Unknown knowledge base selected.")
+
+
 @router.get("")
 async def list_agents(user: dict = Depends(current_user)) -> list[dict]:
     cur = get_db().agents.find({"user_id": str(user["_id"])}).sort("created_at", -1)
@@ -78,6 +88,7 @@ async def create_agent(payload: AgentCreate, user: dict = Depends(current_user))
     db = get_db()
     existing = await db.agents.count_documents({"user_id": user_id})
     require_capacity(user, "ai_agents", existing, label="AI agents")
+    await _check_kb_ids(user_id, payload.knowledge_base_ids)
     doc = payload.model_dump()
     doc["user_id"] = user_id
     doc["created_at"] = utcnow()
@@ -99,6 +110,7 @@ async def update_agent(agent_id: str, payload: AgentUpdate, user: dict = Depends
     user_id = str(user["_id"])
     db = get_db()
     update = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    await _check_kb_ids(user_id, update.get("knowledge_base_ids"))
     update["updated_at"] = utcnow()
     if update.get("is_default"):
         await db.agents.update_many(
