@@ -42,13 +42,13 @@ def test_single_agent_always_wins_and_persists():
     db.leads.update_one.assert_called_once()  # persisted assigned_agent_id
 
 
-def test_sticky_assignment_beats_routing():
-    train = _agent("Train")
+def test_sticky_assignment_beats_routing_without_clear_topic_change():
+    train = _agent("Train", keywords=["train"])
     food = _agent("Food", keywords=["pizza"])
     db = _db([train, food])
     lead = {"_id": ObjectId(), "assigned_agent_id": str(train["_id"])}
-    # message screams "food" but the conversation is already stuck to Train
-    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="I want a pizza")
+    # no other agent's keywords → the conversation stays with Train (even if the LLM might pick otherwise)
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="what time does it leave?")
     assert out["name"] == "Train"
 
 
@@ -181,8 +181,37 @@ def test_live_auto_assignment_still_sticks():
     food = _agent("Food", keywords=["pizza"])
     db = _db_with_history([train, food], {"direction": "outbound", "created_at": _ago(hours=2)})
     lead = {"_id": ObjectId(), "assigned_agent_id": str(train["_id"]), "assigned_agent_source": "auto"}
-    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="I want a pizza")
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="and how much is it?")
     assert out["name"] == "Train"
+
+
+def test_clear_topic_change_hands_over_to_matching_agent():
+    testing = _agent("AI Testing", keywords=["ai testing", "agent testing"])
+    food = _agent("Restaurant", keywords=["restaurant", "menu"])
+    db = _db_with_history([testing, food], {"direction": "outbound", "created_at": _ago(minutes=5)})
+    lead = {"_id": ObjectId(), "assigned_agent_id": str(testing["_id"]), "assigned_agent_source": "auto"}
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="what's on the restaurant menu?")
+    assert out["name"] == "Restaurant"
+    assert db.leads.update_one.call_args[0][1]["$set"]["assigned_agent_id"] == str(food["_id"])
+
+
+def test_no_handover_when_current_agent_also_matches():
+    camp = _agent("Data Course", keywords=["data engineering", "course"])
+    work = _agent("Workshop", keywords=["workshop", "course"])
+    db = _db_with_history([camp, work], {"direction": "outbound", "created_at": _ago(minutes=5)})
+    lead = {"_id": ObjectId(), "assigned_agent_id": str(camp["_id"]), "assigned_agent_source": "auto"}
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="is there a workshop version of the course?")
+    assert out["name"] == "Data Course"  # 'course' is still the current agent's topic
+
+
+def test_manual_pin_never_hands_over_on_topic_change():
+    testing = _agent("AI Testing", keywords=["ai testing"])
+    food = _agent("Restaurant", keywords=["restaurant", "menu"])
+    db = _db_with_history([testing, food], {"direction": "outbound", "created_at": _ago(minutes=5)})
+    lead = {"_id": ObjectId(), "assigned_agent_id": str(testing["_id"]), "assigned_agent_source": "manual"}
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="what's on the restaurant menu?")
+    assert out["name"] == "AI Testing"
+    db.leads.update_one.assert_not_called()
 
 
 def test_stale_auto_assignment_is_rerouted_and_repersisted():
@@ -212,7 +241,7 @@ def test_late_reply_to_campaign_stays_with_campaign_agent():
     prev = {"direction": "outbound", "message_purpose": "campaign", "campaign_id": "c1", "created_at": _ago(days=3)}
     db = _db_with_history([camp, food], prev)
     lead = {"_id": ObjectId(), "assigned_agent_id": str(camp["_id"]), "assigned_agent_source": "campaign"}
-    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="pizza? no — tell me more")
+    out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="yes tell me more")
     assert out["name"] == "Workshop"
 
 
@@ -234,5 +263,5 @@ def test_sticky_expiry_disabled_when_window_zero():
     db = _db_with_history([train, food], {"direction": "inbound", "created_at": _ago(days=90)})
     lead = {"_id": ObjectId(), "assigned_agent_id": str(train["_id"])}
     with patch.object(agent_router.settings, "AGENT_STICKY_WINDOW_HOURS", 0):
-        out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="I want a pizza")
+        out = agent_router.select_agent_for_inbound(db, "u", lead, message_text="what time is it?")
     assert out["name"] == "Train"

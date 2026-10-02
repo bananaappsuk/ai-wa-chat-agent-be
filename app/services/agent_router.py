@@ -6,7 +6,9 @@ choice sticky per conversation. Order of resolution:
   1. Sticky      — lead.assigned_agent_id, if still an active agent for this tenant AND
                    the conversation is still live (previous message within
                    AGENT_STICKY_WINDOW_HOURS). A manual "Handled by" pick never expires.
-                   A stale automatic assignment is re-decided from the new message.
+                   A stale automatic assignment is re-decided from the new message, and a
+                   live one hands over when the message clearly matches another agent's
+                   keywords and none of the current agent's (explicit topic change).
   2. Single      — only one active agent → use it.
   3. Keyword     — inbound text matches an agent's routing_keywords (best score wins).
   4. LLM router  — classify against agent name/description (only when >1 candidate and
@@ -85,20 +87,25 @@ def _latest_inbound_text(db, user_id: str, lead_id: str) -> str:
     return ((doc or {}).get("message") or "").strip()
 
 
+def _keyword_score(agent: dict, text: str) -> int:
+    low = (text or "").lower()
+    score = 0
+    for kw in agent.get("routing_keywords") or []:
+        k = str(kw).strip().lower()
+        if not k:
+            continue
+        # word-boundary match when the keyword is a single token, else substring
+        if re.search(r"\b" + re.escape(k) + r"\b", low) if " " not in k else k in low:
+            score += 1
+    return score
+
+
 def _keyword_pick(agents: list[dict], text: str) -> Optional[dict]:
     if not text:
         return None
-    low = text.lower()
     best, best_score = None, 0
     for a in agents:
-        score = 0
-        for kw in a.get("routing_keywords") or []:
-            k = str(kw).strip().lower()
-            if not k:
-                continue
-            # word-boundary match when the keyword is a single token, else substring
-            if re.search(r"\b" + re.escape(k) + r"\b", low) if " " not in k else k in low:
-                score += 1
+        score = _keyword_score(a, text)
         if score > best_score:
             best, best_score = a, score
     return best if best_score > 0 else None
@@ -194,17 +201,24 @@ def select_agent_for_inbound(
     #    (conversation went quiet) is re-decided from the new message below.
     assigned = str(lead.get("assigned_agent_id") or "").strip()
     stale = False
+    text = message_text if message_text is not None else _latest_inbound_text(db, user_id, lead_id)
     if assigned and assigned in by_id:
         if _assignment_is_live(db, user_id, lead):
-            return by_id[assigned]
+            current = by_id[assigned]
+            # Explicit topic change: the message clearly belongs to ANOTHER agent (its keywords
+            # match, the current agent's don't) → hand over. A manual pin never switches.
+            if lead.get("assigned_agent_source") != "manual" and _keyword_score(current, text) == 0:
+                other = _keyword_pick([a for a in agents if str(a["_id"]) != assigned], text)
+                if other:
+                    _persist(db, lead_id, other)
+                    return other
+            return current
         stale = True
 
     # 2. Single active agent.
     if len(agents) == 1:
         _persist(db, lead_id, agents[0])
         return agents[0]
-
-    text = message_text if message_text is not None else _latest_inbound_text(db, user_id, lead_id)
 
     # 3. Keyword routing.
     picked = _keyword_pick(agents, text)
