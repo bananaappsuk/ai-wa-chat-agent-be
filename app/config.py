@@ -142,6 +142,9 @@ class Settings(BaseSettings):
     # When Atlas Vector Search isn't available (local Mongo, tests) retrieval scores
     # chunks in Python instead, over at most this many chunks.
     KB_FALLBACK_MAX_CHUNKS: int = 5000
+    # Chunks newer than this are also scored directly at query time — Atlas takes a few
+    # seconds to index new vectors, so freshly added knowledge is usable immediately.
+    KB_FRESH_SCAN_SECONDS: int = 180
     KB_USER_AGENT: str = "AIChatKnowledgeBot/1.0 (+https://ai-wa-chat-agent-fe.vercel.app)"
     AI_FAILURE_FALLBACK_ENABLED: bool = True
     AI_FAILURE_FALLBACK_TEXT: str = (

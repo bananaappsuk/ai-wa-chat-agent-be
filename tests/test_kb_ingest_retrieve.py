@@ -217,3 +217,27 @@ def test_javascript_only_site_fails_with_clear_message(db, monkeypatch):
     monkeypatch.setattr(ingest_mod, "crawl_slice", spa)
     assert run_source(db, sid)["status"] == "failed"
     assert "JavaScript" in db.kb_sources.find_one({"_id": ObjectId(sid)})["error"]
+
+
+def test_fresh_chunks_are_found_before_atlas_indexes_them(db, monkeypatch):
+    """Atlas returns only indexed vectors; just-added chunks are merged in by direct scoring."""
+    kb = _kb(db)
+    run_source(db, _text_source(db, kb, WORKSHOP))
+    calls = {}
+
+    def atlas_not_caught_up(db_, user_id, kb_ids, vector, k):
+        calls["vector"] = True
+        return []  # index hasn't picked up the new chunks yet
+
+    monkeypatch.setattr(retrieve_mod, "_vector_search", atlas_not_caught_up)
+    hits = search(db, user_id="t1", kb_ids=[kb], query="workshop fee per participant", k=3, threshold=0.5)
+    assert calls.get("vector") and hits, "fresh chunks must be searchable immediately"
+
+
+def test_serialize_marks_naive_datetimes_as_utc():
+    from datetime import datetime
+
+    from app.models.common import serialize
+
+    out = serialize({"_id": ObjectId(), "at": datetime(2026, 10, 2, 15, 9, 13)})
+    assert out["at"] == "2026-10-02T15:09:13+00:00"

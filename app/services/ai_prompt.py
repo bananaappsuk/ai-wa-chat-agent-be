@@ -117,7 +117,8 @@ def format_kb_context(kb_context) -> str:
         "these for facts about the business (prices, dates, courses, products, policies, contact "
         "details). If the question isn't covered here, say you don't have that detail to hand and "
         "offer to check with the team — never guess or fill gaps, and never claim the business does "
-        "or doesn't offer something these results don't state. Don't mention 'the knowledge base'."
+        "or doesn't offer something these results don't state. Quote prices, numbers and units "
+        "exactly as written — never add or change a currency. Don't mention 'the knowledge base'."
     ]
     for i, h in enumerate(kb_context.hits, start=1):
         head = " — ".join(x for x in (h.title, h.heading) if x)

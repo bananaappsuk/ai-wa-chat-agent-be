@@ -37,6 +37,7 @@ async def init_kb_indexes(db) -> None:
     await db.kb_chunks.create_index([("doc_id", 1)])
     await db.kb_chunks.create_index([("source_id", 1)])
     await db.kb_chunks.create_index([("user_id", 1), ("kb_id", 1)])
+    await db.kb_chunks.create_index([("user_id", 1), ("kb_id", 1), ("created_at", -1)])  # fresh-chunk scan
     await db.kb_gaps.create_index([("user_id", 1), ("created_at", -1)])
 
 

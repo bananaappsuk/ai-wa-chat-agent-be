@@ -30,5 +30,7 @@ def serialize(doc: dict) -> dict:
         if isinstance(v, ObjectId):
             out[k] = str(v)
         elif isinstance(v, datetime):
-            out[k] = v.isoformat()
+            # Mongo hands back naive UTC datetimes; without an offset browsers read them as
+            # local time (an hour off in UK summer). Always emit an explicit UTC offset.
+            out[k] = (v if v.tzinfo else v.replace(tzinfo=timezone.utc)).isoformat()
     return out

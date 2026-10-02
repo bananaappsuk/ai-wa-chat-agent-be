@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -121,8 +122,11 @@ def _vector_search(db, user_id: str, kb_ids: list[str], vector: list[float], k: 
     return list(db.kb_chunks.aggregate(pipeline))
 
 
-def _scan(db, user_id: str, kb_ids: list[str], vector: list[float], k: int) -> list[dict]:
-    rows = db.kb_chunks.find({"user_id": user_id, "kb_id": {"$in": kb_ids}}).limit(int(settings.KB_FALLBACK_MAX_CHUNKS))
+def _scan(db, user_id: str, kb_ids: list[str], vector: list[float], k: int, *, since=None) -> list[dict]:
+    q: dict = {"user_id": user_id, "kb_id": {"$in": kb_ids}}
+    if since is not None:
+        q["created_at"] = {"$gte": since}
+    rows = db.kb_chunks.find(q).limit(int(settings.KB_FALLBACK_MAX_CHUNKS))
     scored = []
     for r in rows:
         try:
@@ -152,6 +156,17 @@ def search(
 
     try:
         rows = _vector_search(db, user_id, kb_ids, vector, k)
+        # Atlas indexes new vectors a few seconds after they're written, so knowledge added
+        # moments ago would be invisible. Score those fresh chunks directly and merge them in.
+        since = datetime.now(timezone.utc) - timedelta(seconds=int(settings.KB_FRESH_SCAN_SECONDS))
+        fresh = _scan(db, user_id, kb_ids, vector, k, since=since)
+        if fresh:
+            by_id = {str(r.get("_id")): r for r in rows}
+            for r in fresh:
+                cur = by_id.get(str(r.get("_id")))
+                if cur is None or float(r["score"]) > float(cur.get("score") or 0):
+                    by_id[str(r.get("_id"))] = r
+            rows = sorted(by_id.values(), key=lambda r: float(r.get("score") or 0), reverse=True)
     except (PyMongoError, NotImplementedError) as exc:  # no Atlas Search (local Mongo / mongomock)
         logger.debug("kb: $vectorSearch unavailable (%s) — scanning", type(exc).__name__)
         rows = _scan(db, user_id, kb_ids, vector, k)
