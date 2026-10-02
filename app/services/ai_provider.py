@@ -101,6 +101,8 @@ def chat_completion(
     conversation_id: Optional[str] = None,
     record_usage: bool = True,
     response_format: Optional[dict] = None,
+    timeout: Optional[float] = None,
+    retries: Optional[int] = None,
 ) -> AIResult:
     if not (settings.OPENAI_API_KEY or "").strip():
         return AIResult(success=False, error_category="authentication", model=model)
@@ -117,7 +119,9 @@ def chat_completion(
 
     last_category = "unknown"
     est_in = sum(estimate_tokens(m.get("content") or "") for m in messages)
-    max_retries = max(0, int(settings.OPENAI_MAX_RETRIES))
+    max_retries = max(0, int(settings.OPENAI_MAX_RETRIES if retries is None else retries))
+    # Optional per-call timeout for auxiliary calls that must not hold up a reply.
+    client = _client_get() if timeout is None else _client_get().with_options(timeout=float(timeout))
     base = float(settings.OPENAI_RETRY_BASE_SECONDS or 1)
 
     def _record_usage(
@@ -181,7 +185,7 @@ def chat_completion(
                 }
                 if response_format:
                     kwargs["response_format"] = response_format
-                resp = _client_get().chat.completions.create(**kwargs)
+                resp = client.chat.completions.create(**kwargs)
                 latency = int((time.perf_counter() - started) * 1000)
                 text, finish_reason, in_tok, out_tok = _extract(resp)
                 in_tok = in_tok or est_in
@@ -205,7 +209,7 @@ def chat_completion(
                     try:
                         started2 = time.perf_counter()
                         kwargs2 = dict(kwargs, max_tokens=retry_tokens, messages=retry_messages)
-                        resp2 = _client_get().chat.completions.create(**kwargs2)
+                        resp2 = client.chat.completions.create(**kwargs2)
                         latency2 = int((time.perf_counter() - started2) * 1000)
                         text2, finish_reason2, in_tok2, out_tok2 = _extract(resp2)
                         in_tok2 = in_tok2 or sum(

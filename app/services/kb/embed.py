@@ -74,20 +74,23 @@ def embed_texts(
     *,
     tenant_id: Optional[str] = None,
     operation: str = "kb_embed",
+    timeout: Optional[float] = None,
+    attempts: int = 3,
 ) -> list[list[float]]:
-    """Embed texts in batches. Raises EmbeddingError if the provider fails after retries."""
+    """Embed texts in batches. Raises EmbeddingError if the provider fails after retries.
+    Reply-time lookups pass a short timeout/attempts so a slow provider can't stall a reply."""
     if not texts:
         return []
     if not (settings.OPENAI_API_KEY or "").strip():
         raise EmbeddingError("OpenAI is not configured.")
     from app.services.ai_provider import _client_get
 
-    client = _client_get()
+    client = _client_get() if timeout is None else _client_get().with_options(timeout=float(timeout))
     out: list[list[float]] = []
     for start in range(0, len(texts), _BATCH):
         batch = [t[:8000] or " " for t in texts[start:start + _BATCH]]
         last: Optional[Exception] = None
-        for attempt in range(3):
+        for attempt in range(max(1, attempts)):
             t0 = time.monotonic()
             try:
                 resp = client.embeddings.create(
@@ -102,7 +105,8 @@ def embed_texts(
                 break
             except Exception as exc:  # network / rate limit / provider error
                 last = exc
-                time.sleep(1.5 * (attempt + 1))
+                if attempt + 1 < max(1, attempts):
+                    time.sleep(1.5 * (attempt + 1))
         if last is not None:
             _record(tenant_id, 0, 0, False, operation)
             raise EmbeddingError(f"Embedding failed ({type(last).__name__}).") from last

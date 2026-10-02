@@ -88,7 +88,10 @@ def standalone_query(history: list[dict], *, tenant_id: Optional[str] = None) ->
                     "content": (
                         "Rewrite the customer's LAST message as one standalone search query for a "
                         "business knowledge base, resolving references like 'it', 'that course', "
-                        "'how much'. Output only the query, no quotes."
+                        "'how much' from the conversation. Rules: write the query in English even if "
+                        "the customer used another language or mixed languages; if the last message "
+                        "isn't asking for information (thanks, ok, bye, small talk), return it "
+                        "unchanged; never turn it into an earlier question. Output only the query."
                     ),
                 },
                 {"role": "user", "content": convo},
@@ -98,6 +101,8 @@ def standalone_query(history: list[dict], *, tenant_id: Optional[str] = None) ->
             max_tokens=60,
             tenant_id=tenant_id,
             operation="kb_query_rewrite",
+            timeout=8,
+            retries=0,  # optional step: if OpenAI is slow, search with the customer's own words
         )
         q = (res.text or "").strip().strip('"') if getattr(res, "success", False) else ""
         return q[:500] or latest
@@ -151,7 +156,7 @@ def search(
 ) -> list[Hit]:
     if not query.strip() or not kb_ids:
         return []
-    vector = embed_texts([query], tenant_id=tenant_id_for_usage or user_id, operation="kb_query")[0]
+    vector = embed_texts([query], tenant_id=tenant_id_for_usage or user_id, operation="kb_query", timeout=10, attempts=2)[0]
     from pymongo.errors import PyMongoError
 
     try:

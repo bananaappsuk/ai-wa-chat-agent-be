@@ -108,7 +108,28 @@ def chunk_text(
                 buf = candidate
         if buf.strip():
             chunks.append(Chunk(index=len(chunks), heading=heading, text=buf))
-    return chunks
+    return _merge_small(chunks, target, max_chars)
+
+
+def _merge_small(chunks: list[Chunk], target: int, max_chars: int) -> list[Chunk]:
+    """Pages built from many tiny heading sections produce scraps (a heading, a one-line
+    card) that waste retrieval slots and carry no context. Fold a small chunk into its
+    neighbour (keeping its heading inline) while the result stays within max_chars. Short
+    but real content is never thrown away — only symbol-only scraps like "01" or "→"."""
+    min_chars = max(200, target // 3)
+    out: list[Chunk] = []
+    for c in chunks:
+        if out:
+            prev = out[-1]
+            small = len(prev.text) < min_chars or len(c.text) < min_chars
+            body = c.text if c.heading == prev.heading or not c.heading else f"{c.heading}\n{c.text}"
+            if small and len(prev.text) + len(body) + 2 <= max_chars:
+                out[-1] = Chunk(index=prev.index, heading=prev.heading or c.heading, text=f"{prev.text}\n\n{body}")
+                continue
+        out.append(c)
+    if len(out) > 1:
+        out = [c for c in out if len(re.sub(r"\W", "", c.text)) >= 3] or out
+    return [Chunk(index=i, heading=c.heading, text=c.text) for i, c in enumerate(out)]
 
 
 def embedding_input(doc_title: str, chunk: Chunk) -> str:

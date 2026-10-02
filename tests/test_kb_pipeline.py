@@ -128,10 +128,12 @@ def test_chunks_follow_headings_and_respect_size():
     text = "# Course\n\nIntro para.\n\n## Fees\n\n" + ("Fee details sentence. " * 200) + "\n\n## Schedule\n\nWeekends only."
     chunks = chunk_text(text, target=800, max_chars=1000, overlap=100)
     assert all(len(c.text) <= 1000 for c in chunks)
-    headings = [c.heading for c in chunks]
-    assert "Course" in headings and "Course > Fees" in headings and "Course > Schedule" in headings
     fee_chunks = [c for c in chunks if c.heading == "Course > Fees"]
     assert len(fee_chunks) > 1  # long section split into several overlapping chunks
+    # small sections survive — as their own chunk or folded (with their heading) into a neighbour
+    everything = "\n".join(f"{c.heading}\n{c.text}" for c in chunks)
+    assert "Intro para." in everything and "Weekends only." in everything
+    assert "Schedule" in everything
 
 
 def test_consecutive_chunks_overlap():
@@ -246,3 +248,16 @@ def test_ip_classification_unwraps_embedded_ipv4(ip, public):
     from app.services.kb.fetch import _ip_is_public
 
     assert _ip_is_public(ip) is public
+
+
+def test_tiny_heading_sections_are_merged_not_scattered():
+    page = "\n\n".join(f"## Card {i}\n\nShort line {i}." for i in range(8))
+    chunks = chunk_text(page, target=1500, max_chars=2000, overlap=200)
+    assert len(chunks) == 1  # eight scraps → one meaningful chunk
+    assert "Card 0" in chunks[0].heading and "## Card" not in chunks[0].text.split("\n")[0]
+    assert all(f"Short line {i}." in chunks[0].text for i in range(8))
+
+
+def test_short_single_snippet_is_kept():
+    chunks = chunk_text("# Fees\n\nThe fee is £99.")
+    assert len(chunks) == 1 and chunks[0].text == "The fee is £99."
