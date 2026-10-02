@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
-    TWILIO_WHATSAPP_FROM: str = "whatsapp:+14155238886"
+    TWILIO_WHATSAPP_FROM: str = "whatsapp:+15559822197"
     # Alias also accepted via TWILIO_VALIDATE_SIGNATURES env (see property)
     TWILIO_VALIDATE_SIGNATURE: bool = True
     TWILIO_VALIDATE_SIGNATURES: bool | None = None

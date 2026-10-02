@@ -17,6 +17,7 @@ from app.security.validation import (
 from app.services.whatsapp_template_approval import (
     display_status_label,
     enrich_template_doc_from_info,
+    is_whatsapp_template_sendable,
     mask_content_sid,
     normalize_whatsapp_approval_status,
     status_emoji,
@@ -303,10 +304,37 @@ async def get_approved_template(user_id: str, template_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Template not found")
     if (doc.get("provider") or "twilio_content") == "meta":
         raise HTTPException(status_code=400, detail="Meta templates cannot be sent as Twilio Content templates")
-    if doc.get("status") != "approved":
-        raise HTTPException(status_code=400, detail="Template is not approved")
-    if not doc.get("content_sid"):
+    sid = (doc.get("content_sid") or "").strip()
+    if not sid:
         raise HTTPException(status_code=400, detail="Template has no content_sid")
+
+    # Gate on the REAL WhatsApp approval status, not the local library flag. Statuses drift
+    # after submission, so refresh live from Twilio here (this runs once per campaign, not per
+    # recipient). Fall back to the stored status if the refresh call fails, so a transient
+    # Twilio blip never blocks an already-approved template.
+    from app.services import twilio_service
+
+    wa_status = doc.get("whatsapp_approval_status")
+    try:
+        info = twilio_service.get_content_template_info(sid)
+        wa_status = normalize_whatsapp_approval_status(info.get("whatsapp_status")) or wa_status
+        await get_db().templates.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {
+                "whatsapp_approval_status": wa_status,
+                "whatsapp_approval_checked_at": utcnow(),
+                "updated_at": utcnow(),
+            }},
+        )
+        doc["whatsapp_approval_status"] = wa_status
+    except Exception:
+        pass
+
+    if not is_whatsapp_template_sendable(wa_status):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Template is {display_status_label(wa_status)} on WhatsApp and can't be sent until approved.",
+        )
     return doc
 
 

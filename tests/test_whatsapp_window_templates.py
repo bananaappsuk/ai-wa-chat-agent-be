@@ -185,11 +185,17 @@ async def test_non_approved_template_rejected():
             "status": "draft",
         }
     )
-    with patch("app.routes.templates.get_db", return_value=db):
+    db.templates.update_one = AsyncMock(return_value=SimpleNamespace(matched_count=1))
+    # Gate on the live WhatsApp approval status, not the local flag: a template Meta rejected
+    # must be blocked even if the local library row is somehow marked otherwise.
+    with patch("app.routes.templates.get_db", return_value=db), patch(
+        "app.services.twilio_service.get_content_template_info",
+        return_value={"whatsapp_status": "rejected", "content_sid": "HXabc"},
+    ):
         with pytest.raises(HTTPException) as exc:
             await get_approved_template(user_id, str(tmpl_id))
     assert exc.value.status_code == 400
-    assert "not approved" in str(exc.value.detail).lower()
+    assert "rejected" in str(exc.value.detail).lower()
 
 
 @pytest.mark.asyncio

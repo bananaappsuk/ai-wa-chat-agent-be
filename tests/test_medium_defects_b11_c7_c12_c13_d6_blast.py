@@ -165,7 +165,8 @@ def test_is_self_sender_matches_twilio_from():
     from app.config import settings
 
     assert is_self_sender(settings.TWILIO_WHATSAPP_FROM, None) is True
-    assert is_self_sender("whatsapp:+14155238886", {}) is True
+    # Bare E.164 form of the configured sender is also recognised as self.
+    assert is_self_sender(settings.TWILIO_WHATSAPP_FROM.replace("whatsapp:", ""), {}) is True
 
 
 def test_is_self_sender_matches_user_configured_number():
