@@ -23,9 +23,15 @@ NO_MATCH_REMINDER = (
     "do NOT state a value — say you don't have that detail to hand and offer to check with the team. "
     "You can still greet, chat, or explain general concepts."
 )
+LIVE_REMINDER = (
+    "Live information (weather, news, rates…) from the LIVE LOOKUP RESULTS can be stated as given; "
+    "the knowledge rule applies only to facts about the business."
+)
 GROUNDED_REMINDER = (
     "Before you reply: state facts about the business only if they appear in the KNOWLEDGE BASE "
-    "RESULTS; for anything those results don't cover, say you'll check with the team."
+    "RESULTS. When the results describe what was asked (steps, a process, a list, prices, dates), "
+    "give THOSE items in their order and wording — never swap in a generic or 'typical' version. "
+    "For anything the results don't cover, say you'll check with the team."
 )
 
 
@@ -46,6 +52,8 @@ def generate_reply(
     user: Optional[dict] = None,
     neutral: bool = False,
     kb_context=None,
+    neutral_topics: Optional[list[str]] = None,
+    live_lookup=None,
 ) -> str:
     ai = ai_settings or resolve_ai_settings(user)
     if not ai.get("enabled"):
@@ -61,6 +69,9 @@ def generate_reply(
         message_purpose="support",
         neutral=neutral,
         kb_context=kb_context,
+        neutral_topics=neutral_topics,
+        live_lookup=live_lookup,
+        local_timezone=(user or {}).get("timezone"),
     )
     ctx_msgs = []
     for m in history[-int(settings.AI_MAX_CONTEXT_MESSAGES or settings.OPENAI_MAX_HISTORY) :]:
@@ -78,6 +89,9 @@ def generate_reply(
     elif kb_context is not None and getattr(kb_context, "error", None) and not (agent or {}).get("knowledge_base"):
         # Lookup failed and there's no pasted fallback knowledge — same rule as "nothing matched".
         messages.append({"role": "system", "content": NO_MATCH_REMINDER})
+    if live_lookup is not None and getattr(live_lookup, "ok", False) and messages[-1]["content"] in (GROUNDED_REMINDER, NO_MATCH_REMINDER):
+        # The knowledge reminder above is about business facts — not the weather just looked up.
+        messages.append({"role": "system", "content": LIVE_REMINDER})
     lead_oid = (lead or {}).get("_id") or (lead or {}).get("id")
     temperature = float(ai["temperature"])
     if kb_context is not None and getattr(kb_context, "searched", False):

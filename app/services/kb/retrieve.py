@@ -27,7 +27,7 @@ _SMALL_TALK_WORDS = frozenset(
     "hi hii hiii hello helo hey heyy hiya yo hai hola good morning afternoon evening night day "
     "thanks thank thankyou thx ty cheers you u ok okay k cool great nice awesome bye goodbye see ya "
     "later how are r doing is it going what's whats up sup i'm im am fine well there all everyone "
-    "dear sir madam mate bro buddy and".split()
+    "dear sir madam mate bro buddy and btw lol haha hehe hmm hmmm wow yay nice cheers gud thx".split()
 )
 
 
@@ -153,10 +153,26 @@ def search(
     k: int,
     threshold: float,
     tenant_id_for_usage: Optional[str] = None,
+    extra_queries: Optional[list[str]] = None,
 ) -> list[Hit]:
-    if not query.strip() or not kb_ids:
+    """Top-k chunks for `query` (plus any `extra_queries` — e.g. the customer's own words —
+    embedded in the same call; each chunk keeps its best score across the queries)."""
+    queries = [q.strip() for q in [query, *(extra_queries or [])] if q and q.strip()]
+    queries = list(dict.fromkeys(queries))[:3]
+    if not queries or not kb_ids:
         return []
-    vector = embed_texts([query], tenant_id=tenant_id_for_usage or user_id, operation="kb_query", timeout=10, attempts=2)[0]
+    vectors = embed_texts(queries, tenant_id=tenant_id_for_usage or user_id, operation="kb_query", timeout=10, attempts=2)
+    best: dict[str, dict] = {}
+    for vector in vectors:
+        for r in _rows_for_vector(db, user_id, kb_ids, vector, k):
+            key = str(r.get("_id"))
+            if key not in best or float(r.get("score") or 0) > float(best[key].get("score") or 0):
+                best[key] = r
+    rows = sorted(best.values(), key=lambda r: float(r.get("score") or 0), reverse=True)
+    return _to_hits(rows, k, threshold)
+
+
+def _rows_for_vector(db, user_id: str, kb_ids: list[str], vector: list[float], k: int) -> list[dict]:
     from pymongo.errors import PyMongoError
 
     try:
@@ -175,6 +191,10 @@ def search(
     except (PyMongoError, NotImplementedError) as exc:  # no Atlas Search (local Mongo / mongomock)
         logger.debug("kb: $vectorSearch unavailable (%s) — scanning", type(exc).__name__)
         rows = _scan(db, user_id, kb_ids, vector, k)
+    return rows
+
+
+def _to_hits(rows: list[dict], k: int, threshold: float) -> list[Hit]:
     hits: list[Hit] = []
     seen: set[str] = set()
     for r in rows:
@@ -201,9 +221,12 @@ def search(
     return hits
 
 
-def retrieve_for_reply(db, *, user_id: str, agent: Optional[dict], history: list[dict]) -> Optional[KBContext]:
+def retrieve_for_reply(
+    db, *, user_id: str, agent: Optional[dict], history: list[dict], query: Optional[str] = None
+) -> Optional[KBContext]:
     """Knowledge for an agent reply. None when the agent has no knowledge bases (callers then
-    fall back to the agent's legacy knowledge text)."""
+    fall back to the agent's legacy knowledge text). `query` is the router's standalone search
+    query; without it the latest message is rewritten here."""
     kb_ids = [str(x) for x in ((agent or {}).get("knowledge_base_ids") or []) if x]
     if not kb_ids:
         return None
@@ -214,9 +237,10 @@ def retrieve_for_reply(db, *, user_id: str, agent: Optional[dict], history: list
     latest = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
     if is_small_talk(latest):
         return ctx
-    ctx.query = standalone_query(history, tenant_id=user_id)
+    ctx.query = (query or "").strip() or standalone_query(history, tenant_id=user_id)
     try:
-        ctx.hits = search(db, user_id=user_id, kb_ids=owned, query=ctx.query, k=k, threshold=threshold)
+        ctx.hits = search(db, user_id=user_id, kb_ids=owned, query=ctx.query, k=k, threshold=threshold,
+                          extra_queries=[latest])
         ctx.searched = True
     except EmbeddingError as exc:
         ctx.error = str(exc)

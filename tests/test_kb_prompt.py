@@ -1,4 +1,5 @@
 """How retrieved knowledge reaches the system prompt."""
+import pytest
 from app.services.ai_prompt import build_system_prompt, format_kb_context
 from app.services.kb.retrieve import Hit, KBContext
 
@@ -113,3 +114,23 @@ def test_failed_lookup_without_fallback_text_still_forbids_guessing(monkeypatch)
     assert seen["m"][-1]["content"] == openai_service.NO_MATCH_REMINDER
     openai_service.generate_reply(AGENT, [{"role": "user", "content": "price?"}], ai_settings=ai, kb_context=failed)
     assert seen["m"][-1]["role"] == "user"  # pasted knowledge fallback is in the prompt instead
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("I don't have that detail to hand, but I can check with the team for you.", True),
+    ("I'll pass this to the team and someone will get back to you.", True),
+    ("I can connect you with one of our experts.", True),
+    ("The course covers evaluation, CI/CD and governance. Want more detail?", False),
+    ("Hi Ravi! I'm good, thanks 😊 What can I help you with today?", False),
+])
+def test_deferral_replies_are_flagged_for_a_human(reply, expected):
+    from app.workers.tasks import _needs_team_followup
+
+    assert _needs_team_followup(None, reply) is expected
+
+
+def test_knowledge_gap_is_always_flagged():
+    from app.workers.tasks import _needs_team_followup
+
+    assert _needs_team_followup(KBContext(kb_ids=["k"], searched=True, hits=[]), "Sure!") is True
+    assert _needs_team_followup(KBContext(kb_ids=["k"], searched=True, hits=[_hit("x")]), "Here you go.") is False

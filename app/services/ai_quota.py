@@ -65,13 +65,20 @@ def check_quota(tenant_id: str) -> tuple[bool, Optional[str]]:
         return True, None
 
 
-def record_quota_usage(tenant_id: str, *, tokens: int, cost: float) -> None:
+# Sub-steps of one customer reply (routing, query rewrite, embedding, live lookup) and background
+# KB ingestion. Their tokens and cost count as usual, but they don't each use up the per-minute
+# request limit — one customer message makes several of them, and a crawl makes many.
+_NOT_COUNTED_AS_REQUESTS = frozenset({"agent_route", "kb_query", "kb_query_rewrite", "kb_embed", "web_lookup"})
+
+
+def record_quota_usage(tenant_id: str, *, tokens: int, cost: float, count_request: bool = True) -> None:
     try:
         r = _redis()
         rpm_k, day_k, cost_k = _period_keys(tenant_id)
         pipe = r.pipeline()
-        pipe.incr(rpm_k)
-        pipe.expire(rpm_k, 120)
+        if count_request:
+            pipe.incr(rpm_k)
+            pipe.expire(rpm_k, 120)
         if tokens:
             pipe.incrby(day_k, int(tokens))
             pipe.expire(day_k, 86400 * 2)
@@ -168,7 +175,7 @@ async def record_usage_async(
     res = await db.ai_usage.insert_one(doc)
     doc["_id"] = res.inserted_id
     if success:
-        record_quota_usage(tenant_id, tokens=total, cost=cost)
+        record_quota_usage(tenant_id, tokens=total, cost=cost, count_request=operation not in _NOT_COUNTED_AS_REQUESTS)
     return doc
 
 
@@ -186,9 +193,11 @@ def record_usage_sync(
     conversation_id: Optional[str] = None,
     user_id: Optional[str] = None,
     metadata: Optional[dict] = None,
+    extra_cost: float = 0.0,
 ) -> dict:
+    """`extra_cost` covers fees not priced per token (e.g. web search tool calls)."""
     total = int(input_tokens) + int(output_tokens)
-    cost = estimate_cost(model, int(input_tokens), int(output_tokens))
+    cost = round(estimate_cost(model, int(input_tokens), int(output_tokens)) + float(extra_cost or 0), 6)
     doc = {
         "tenant_id": tenant_id,
         "user_id": user_id or tenant_id,
@@ -208,7 +217,7 @@ def record_usage_sync(
     res = db.ai_usage.insert_one(doc)
     doc["_id"] = res.inserted_id
     if success:
-        record_quota_usage(tenant_id, tokens=total, cost=cost)
+        record_quota_usage(tenant_id, tokens=total, cost=cost, count_request=operation not in _NOT_COUNTED_AS_REQUESTS)
     return doc
 
 

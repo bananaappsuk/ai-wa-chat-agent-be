@@ -36,3 +36,24 @@ def isolate_redis(monkeypatch):
         pass
 
     yield
+
+
+@pytest.fixture(autouse=True)
+def no_real_openai(monkeypatch):
+    """Tests must never reach the real OpenAI API (cost, flakiness). Any call that isn't
+    mocked fails fast inside chat_completion / embed_texts as a provider error."""
+    import app.services.ai_provider as _ap
+
+    class _Blocked:
+        def __getattr__(self, name):
+            raise RuntimeError("real OpenAI call attempted in tests — mock it")
+
+    monkeypatch.setattr(_ap, "_client_get", lambda: _Blocked())
+
+    import app.services.web_lookup as _wl
+
+    def _blocked_post(body):
+        raise RuntimeError("real web lookup attempted in tests — mock it")
+
+    monkeypatch.setattr(_wl, "_post", _blocked_post)
+    yield

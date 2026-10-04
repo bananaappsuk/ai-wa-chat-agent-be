@@ -1,6 +1,7 @@
 """Sync RQ tasks. These run in the worker process and use sync Mongo + Redis."""
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from bson import ObjectId
@@ -496,9 +497,9 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
     )
 
     user = db.users.find_one({"_id": ObjectId(user_id)})
-    from app.services.agent_router import select_agent_for_inbound
+    from app.services.agent_router import welcome_agent
 
-    agent = select_agent_for_inbound(db, user_id, lead)
+    agent = welcome_agent(db, user_id, lead)
     welcome = (agent or {}).get("welcome_message") or ""
     terms = (agent or {}).get("terms_text") or ""
 
@@ -594,15 +595,32 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
             logger.exception("record_activity_sync failed for welcome send")
 
 
-def _retrieve_knowledge(db, user_id: str, lead_id: str, agent: Optional[dict], history: list[dict], trigger_id):
+_DEFERRAL = re.compile(
+    r"\b(check|confirm|pass|forward|refer|escalat\w*|connect|find out)\b[^.?!]{0,40}\b(team|colleague|someone|a person|human|expert)",
+    re.I,
+)
+
+
+def _needs_team_followup(kb_ctx, reply: str, live=None) -> bool:
+    """True when the reply hands the question to a person — the knowledge didn't cover it, or
+    the AI said it would check with / pass it to the team. When the message needed a live
+    lookup, only an explicit hand-off counts (the knowledge wasn't what was asked)."""
+    if live is None and kb_ctx is not None and getattr(kb_ctx, "searched", False) and not kb_ctx.hits:
+        return True
+    return bool(_DEFERRAL.search(reply or ""))
+
+
+def _retrieve_knowledge(
+    db, user_id: str, lead_id: str, agent: Optional[dict], history: list[dict], trigger_id, query: str = "", log_gap: bool = True
+):
     """Knowledge-base lookup for this reply. Never raises — a lookup problem must not stop
-    the reply. Records a trace (which chunks were used) and unanswered questions."""
+    the reply. Records a trace (which chunks were used) and unanswered questions (`log_gap`)."""
     if not agent:
         return None
     try:
         from app.services.kb.retrieve import retrieve_for_reply
 
-        ctx = retrieve_for_reply(db, user_id=user_id, agent=agent, history=history)
+        ctx = retrieve_for_reply(db, user_id=user_id, agent=agent, history=history, query=query)
     except Exception:
         logger.exception("kb retrieval crashed user_id=%s lead_id=%s", user_id, lead_id)
         return None
@@ -622,7 +640,7 @@ def _retrieve_knowledge(db, user_id: str, lead_id: str, agent: Optional[dict], h
                 "created_at": now,
             }
         )
-        if not ctx.hits:
+        if not ctx.hits and log_gap:
             question = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
             db.kb_gaps.insert_one(
                 {
@@ -639,6 +657,38 @@ def _retrieve_knowledge(db, user_id: str, lead_id: str, agent: Optional[dict], h
     except Exception:
         logger.debug("kb trace write failed", exc_info=True)
     return ctx
+
+
+def _live_lookup(db, user_id: str, lead_id: str, query: str, trigger_id):
+    """Run the live web lookup the router asked for. Never raises; records a trace."""
+    if not query:
+        return None
+    try:
+        from app.services.web_lookup import live_lookup
+
+        res = live_lookup(query, tenant_id=user_id)
+    except Exception:
+        logger.exception("live lookup crashed user_id=%s lead_id=%s", user_id, lead_id)
+        return None
+    try:
+        db.ai_events.insert_one(
+            {
+                "tenant_id": user_id,
+                "event_type": "live_lookup",
+                "conversation_id": lead_id,
+                "trigger_message_id": str(trigger_id) if trigger_id else None,
+                "query": res.query,
+                "ok": res.ok,
+                "cached": res.cached,
+                "reason": res.reason or None,
+                "text": res.text[:1000],
+                "sources": res.sources,
+                "created_at": datetime.now(timezone.utc),
+            }
+        )
+    except Exception:
+        logger.debug("lookup trace write failed", exc_info=True)
+    return res
 
 
 def generate_and_send_ai_reply(
@@ -787,10 +837,30 @@ def generate_and_send_ai_reply(
         pass
 
     company = (user or {}).get("company_name")
-    from app.services.agent_router import select_agent_for_inbound
+    from app.services.agent_router import route_message
 
-    agent = select_agent_for_inbound(db, user_id, lead)
+    # Decided fresh for every message from the conversation — no agent locks.
+    route = route_message(db, user_id, lead)
+    agent = route.agent
     agent_id = str(agent["_id"]) if agent and agent.get("_id") else None
+    try:
+        db.ai_events.insert_one(
+            {
+                "tenant_id": user_id,
+                "event_type": "route",
+                "conversation_id": lead_id,
+                "trigger_message_id": str(trigger_id) if trigger_id else None,
+                "mode": route.mode,
+                "agent_id": agent_id,
+                "agent_name": (agent or {}).get("name"),
+                "continues_previous": route.continues,
+                "via": route.via,
+                "lookup_query": route.lookup_query or None,
+                "created_at": datetime.now(timezone.utc),
+            }
+        )
+    except Exception:
+        logger.debug("route trace write failed", exc_info=True)
     agent_name = ((agent or {}).get("name") or "").strip() or "AI Agent"
     summary_doc = get_summary(db, tenant_id=user_id, lead_id=lead_id)
     summary_text = (summary_doc or {}).get("summary")
@@ -805,7 +875,11 @@ def generate_and_send_ai_reply(
         {"role": m["role"], "content": m["content"], "direction": "inbound" if m["role"] == "user" else "outbound", "message": m["content"]}
         for m in ctx["messages"]
     ]
-    kb_ctx = _retrieve_knowledge(db, user_id, lead_id, agent, history, trigger_id)
+    # A live-info question (weather, news…) missing from the knowledge base isn't a knowledge gap.
+    kb_ctx = _retrieve_knowledge(
+        db, user_id, lead_id, agent, history, trigger_id, query=route.query, log_gap=not route.lookup_query
+    )
+    live = _live_lookup(db, user_id, lead_id, route.lookup_query, trigger_id)
 
     fallback_sent_key = f"ai:fallback_sent:{user_id}:{lead_id}"
     try:
@@ -819,7 +893,9 @@ def generate_and_send_ai_reply(
             summary=summary_text if ctx.get("summary_used") else summary_text,
             user=user,
             neutral=agent is None,
+            neutral_topics=route.topics,
             kb_context=kb_ctx,
+            live_lookup=live,
         )
     except Exception as exc:
         logger.exception(
@@ -994,16 +1070,31 @@ def generate_and_send_ai_reply(
             {"_id": res.inserted_id},
             {"$set": set_fields},
         )
+        # A reply that defers ("I'll check with the team") must reach a person — otherwise it's
+        # an empty promise. Flag the conversation; any other successful reply clears the flag.
+        handoff = _needs_team_followup(kb_ctx, reply, live)
         db.leads.update_one(
             {"_id": ObjectId(lead_id)},
             {
                 "$set": {
-                    "needs_human": False,
+                    "needs_human": handoff,
+                    "needs_human_reason": "ai_deferred_to_team" if handoff else None,
                     "last_ai_error_category": None,
                     "updated_at": datetime.now(timezone.utc),
                 }
             },
         )
+        if handoff:
+            create_notification_sync(
+                db,
+                user_id=user_id,
+                type="needs_human",
+                title="A customer is waiting for an answer",
+                message=f"The AI promised to check with the team: \"{inbound_text[:140]}\"",
+                resource_type="lead",
+                resource_id=lead_id,
+                dedupe_key=f"ai_deferred:{lead_id}:{datetime.now(timezone.utc).strftime('%Y%m%d%H')}",
+            )
         msg = db.messages.find_one({"_id": res.inserted_id})
         if msg:
             _publish(user_id, "message:updated", _serialize(msg))

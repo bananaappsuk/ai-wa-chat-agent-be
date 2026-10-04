@@ -94,10 +94,23 @@ class Settings(BaseSettings):
     # see the current one (0 = no cut). A business-initiated message the customer is
     # replying to is kept even across the gap.
     AI_CONTEXT_SESSION_GAP_HOURS: float = 24
-    # An automatic agent assignment sticks only while the conversation is live — previous
-    # message within this many hours (0 = never expires). Manual picks never expire.
-    AGENT_STICKY_WINDOW_HOURS: float = 24
-    AI_DAILY_TOKEN_LIMIT_PER_TENANT: int = 200000
+    # Live lookups: when a message needs current information (weather, news, scores, exchange
+    # rates…) the router asks for one OpenAI web search and the reply is written from the results.
+    AI_WEB_LOOKUP_ENABLED: bool = True
+    AI_WEB_LOOKUP_MODEL: str = "gpt-4o-mini"
+    AI_WEB_LOOKUP_COST_PER_CALL: float = 0.01  # OpenAI web search tool: $10 / 1k calls
+    AI_WEB_LOOKUP_DAILY_LIMIT_PER_TENANT: int = 200
+    AI_WEB_LOOKUP_CACHE_SECONDS: int = 600
+    AI_WEB_LOOKUP_TIMEOUT_SECONDS: float = 15
+    AI_WEB_LOOKUP_COUNTRY: str = "GB"
+    # Prompts include the current date/time here unless the tenant set a real local timezone.
+    AI_DEFAULT_TIMEZONE: str = "Europe/London"
+    # Model that decides who answers each message (tiny call: conversation + agent list → JSON).
+    AI_ROUTER_MODEL: str = "gpt-4o-mini"
+    # Each conversational message uses routing + knowledge lookup + reply (a few thousand tokens),
+    # so 200k/day stopped AI replies after ~60–80 messages. The monthly cost cap below is the
+    # real spend guard.
+    AI_DAILY_TOKEN_LIMIT_PER_TENANT: int = 2_000_000
     AI_MONTHLY_COST_LIMIT_PER_TENANT: float = 50.0
     AI_MAX_REQUESTS_PER_MINUTE_PER_TENANT: int = 30
     AI_SUMMARY_TRIGGER_MESSAGE_COUNT: int = 8
