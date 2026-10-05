@@ -618,7 +618,11 @@ def build_campaign_prompt_sections(
         )
     )
     if knowledge_text:
-        parts.append("SELECTED CAMPAIGN KNOWLEDGE:\n" + sanitize_text(knowledge_text, max_len=6000))
+        parts.append(
+            "SELECTED CAMPAIGN KNOWLEDGE (facts you may use — write the message in your own words; never "
+            "copy this text, and never mention files, notes or internal rules):\n"
+            + sanitize_text(knowledge_text, max_len=6000)
+        )
     else:
         parts.append("SELECTED CAMPAIGN KNOWLEDGE:\n(none)")
     if flags.get("include_lead_profile") and profile:
@@ -796,26 +800,30 @@ def prepare_template_variables_for_send(
     return _crm_variable_fallback(declared, lead, campaign)
 
 
-def _format_knowledge_base_message(
-    knowledge_text: str,
-    *,
-    lead: Optional[dict],
-    campaign: dict,
-) -> str:
-    """Build a sendable WhatsApp body from agent KB only — no generative AI."""
-    text = sanitize_text(knowledge_text or "", max_len=_MAX_FREEFORM)
-    name = ((lead or {}).get("name") or "").strip()
-    first = name.split()[0] if name else ""
-    # Prefer campaign goal as a short opener only if it already appears in KB (no invention)
-    goal = sanitize_text(campaign.get("campaign_goal") or "", max_len=120)
-    if first:
-        msg = f"Hi {first},\n\n{text}"
-    else:
-        msg = text
-    if len(msg) > _MAX_FREEFORM:
-        msg = msg[: _MAX_FREEFORM - 1].rsplit(" ", 1)[0] + "…"
-    _ = goal  # reserved for future non-AI framing; never invent content
-    return msg.strip()
+_GREETING_VAR = r"\b(?:hi|hello|hey|hiya|dear|welcome)\s*,?\s*\{\{\s*%s\s*\}\}"
+
+
+def fill_blank_greeting_variables(
+    content_variables: Optional[dict], *, lead: Optional[dict], template_body: str
+) -> Optional[dict]:
+    """Twilio rejects empty template variables. A blank variable the template greets
+    ("Hi {{1}}") gets the contact's first name ("there" without one); any other blank raises
+    ValueError — never guess what a non-greeting variable should say."""
+    if not isinstance(content_variables, dict) or not content_variables:
+        return content_variables
+    parts = ((lead or {}).get("name") or "").strip().split()
+    first = parts[0] if parts and not parts[0].lstrip("+").isdigit() else "there"
+    out: dict[str, Any] = {}
+    for key, val in content_variables.items():
+        if str(val or "").strip():
+            out[key] = val
+        elif re.search(_GREETING_VAR % re.escape(str(key)), template_body or "", re.I):
+            out[key] = first
+        else:
+            raise ValueError(
+                f"Template variable {{{{{key}}}}} is empty — fill it in on the campaign and send again."
+            )
+    return out
 
 
 def generate_campaign_content(
@@ -888,47 +896,17 @@ def generate_campaign_content(
         db, user_id=user_id, campaign=campaign, agent=agent_doc
     )
 
-    # Knowledge base selected → send KB script only. Do NOT call generative AI.
-    if knowledge_scope == "selected" and path.path == "ai_freeform":
-        if not (knowledge_text or "").strip():
-            return GenerationResult(
-                ok=False,
-                error_category="knowledge_base_empty",
-                needs_manual_review=True,
-                knowledge_sources_used=[],
-                context_sources_used=["agent_knowledge_base"],
-            )
-        raw = _format_knowledge_base_message(knowledge_text, lead=lead, campaign=campaign)
-        ok, cleaned, reason = _validate_freeform(raw, agent_snap=snap or {}, ai=ai or {})
-        if not ok:
-            # Soft fallback: still send sanitized KB if only quality/price blocked generative checks
-            cleaned = sanitize_text(raw, max_len=_MAX_FREEFORM)
-            if not cleaned:
-                return GenerationResult(
-                    ok=False,
-                    error_category=reason or "knowledge_base_invalid",
-                    needs_manual_review=True,
-                    knowledge_sources_used=knowledge_sources,
-                )
+    # Knowledge base selected → the AI writes the message from these facts (never the raw text).
+    if knowledge_scope == "selected" and path.path == "ai_freeform" and not (knowledge_text or "").strip():
         return GenerationResult(
-            ok=True,
-            content_source="knowledge_base",
-            message=cleaned,
-            confidence=1.0,
-            warnings=["knowledge_base_script_no_generative_ai"],
-            model=None,
-            input_tokens=0,
-            output_tokens=0,
-            language=sanitize_text(
-                campaign.get("campaign_language") or ai.get("default_language") or "en", max_len=20
-            ),
+            ok=False,
+            error_category="knowledge_base_empty",
+            needs_manual_review=True,
+            knowledge_sources_used=[],
             context_sources_used=["agent_knowledge_base"],
-            knowledge_sources_used=knowledge_sources or ["agent_knowledge_base"],
-            topic_alignment_passed=True,
         )
 
-    # Knowledge-base mode never uses generative AI for free-form.
-    # Closed-window leads still get the approved fallback template (variables from CRM/static only).
+    # Knowledge-base mode, closed window: approved fallback template (variables from CRM/static only).
     if knowledge_scope == "selected":
         if path.path == "ai_template_variables":
             tid, sid = resolve_fallback_template(campaign)
@@ -966,14 +944,15 @@ def generate_campaign_content(
                 context_sources_used=["campaign_template"],
                 knowledge_sources_used=knowledge_sources,
             )
-        return GenerationResult(
-            ok=False,
-            error_category=path.reason_code or "knowledge_base_not_sendable",
-            needs_manual_review=False,
-            knowledge_sources_used=knowledge_sources,
-        )
+        if path.path != "ai_freeform":
+            return GenerationResult(
+                ok=False,
+                error_category=path.reason_code or "knowledge_base_not_sendable",
+                needs_manual_review=False,
+                knowledge_sources_used=knowledge_sources,
+            )
 
-    # Generative AI path — only when knowledge base is NOT selected
+    # Generative AI path (the selected knowledge goes in as facts when scope is "selected")
     if not ai.get("enabled"):
         return GenerationResult(ok=False, error_category="ai_disabled", needs_manual_review=True)
 
@@ -984,7 +963,7 @@ def generate_campaign_content(
     )
     if flags.get("include_lead_profile"):
         context_used.append("lead_profile")
-    # Do not inject agent KB into generative campaigns unless scope allows (none here)
+    # Agent KB goes into the prompt only when the campaign selected it
     context_used = list(dict.fromkeys(context_used + ["campaign_goal", "campaign_instructions"]))
 
     language = sanitize_text(
@@ -1003,7 +982,7 @@ def generate_campaign_content(
     system = build_campaign_prompt_sections(
         campaign=campaign,
         snap=snap,
-        knowledge_text="",  # generative mode: no KB
+        knowledge_text=knowledge_text if knowledge_scope == "selected" else "",
         profile=profile,
         summary=summary,
         recent=recent,

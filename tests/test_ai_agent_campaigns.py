@@ -544,17 +544,123 @@ def test_knowledge_selected_uses_campaign_text_only():
     assert "campaign_knowledge_text" in sources
 
 
-def test_knowledge_base_message_format_no_ai_invention():
-    from app.services.ai_campaign import _format_knowledge_base_message
+KB_TEXT = (
+    "--- From file: AI_Exam_Revision_Coach_Pasted_Knowledge.pdf ---\n"
+    "AI Exam Revision Coach\n Sample Knowledge Base / Pasted Knowledge\n"
+    "Smart Study Academy provides online revision support for Maths, English and Science.\n"
+    "A standard online study session lasts 60 minutes and starts from GBP 20.\n"
+    "Tutors and the AI revision coach must not assist students with cheating."
+)
+AI_MESSAGE = (
+    "Hi Priya, exam season is coming! Smart Study Academy offers online revision support for "
+    "Maths, English and Science, with 60-minute sessions from GBP 20. Reply to plan your revision."
+)
 
-    msg = _format_knowledge_base_message(
-        "AI Summer Camp Essentials 2026. Register at ittalenthub.co.uk.",
-        lead={"name": "Priya Sharma"},
-        campaign={"campaign_goal": "Invite to camp"},
-    )
-    assert msg.startswith("Hi Priya,")
-    assert "AI Summer Camp Essentials 2026" in msg
-    assert "exciting opportunity" not in msg.lower()
+
+def _kb_campaign(scope="selected"):
+    return {
+        "content_mode": "ai_agent",
+        "delivery_scope": "all_eligible_recipients",
+        "knowledge_scope": scope,
+        "allow_freeform_inside_window": True,
+        "personalise_template_variables": True,
+        "fallback_template_id": "6a676016189a389992e3c532",
+        "fallback_template_content_sid": "HXabc",
+        "agent_id": "6a64d4b671d5ebe46637ed16",
+        "agent_snapshot": {"name": "AI Exam Revision Coach", "prompt": "x", "tone": "neutral"},
+        "campaign_subject": "October Exam Revision Support",
+        "campaign_goal": "Invite students to get support with exam revision for Maths, English and Science.",
+    }
+
+
+def _run_generation(campaign, knowledge, lead, reply_text=AI_MESSAGE):
+    """generate_campaign_content with the model mocked; returns (result, prompts sent to the model)."""
+    import json
+    from types import SimpleNamespace
+
+    from app.services.ai_campaign import generate_campaign_content
+
+    prompts = []
+
+    def fake_chat(messages, **kw):
+        prompts.append(messages)
+        return SimpleNamespace(success=True, text=json.dumps({"message": reply_text, "language": "en",
+                               "confidence": 0.9, "warnings": [], "call_to_action": "Reply"}),
+                               input_tokens=500, output_tokens=60, model="gpt-4o-mini", finish_reason="stop",
+                               error_category=None)
+
+    db = MagicMock()
+    db.users.find_one.return_value = {"_id": "u1", "company_name": "Smart Study Academy"}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.services.ai_campaign.get_campaign_agent",
+                   lambda *a, **k: {"_id": "a1", "name": "AI Exam Revision Coach", "knowledge_base": knowledge})
+        mp.setattr("app.services.ai_campaign.resolve_campaign_knowledge",
+                   lambda *a, **k: (knowledge, ["agent_knowledge_base"] if knowledge else [], {}))
+        mp.setattr("app.services.ai_campaign.resolve_ai_settings",
+                   lambda *a, **k: {"enabled": True, "primary_model": "gpt-4o-mini", "max_output_tokens": 400,
+                                    "temperature": 0.5})
+        mp.setattr("app.services.ai_campaign.chat_completion", fake_chat)
+        gen = generate_campaign_content(db, user_id="6a635d7e9c6d71ce4cb705c0", campaign=campaign,
+                                        recipient={"phone": "+447700900000", "lead_id": None}, lead=lead,
+                                        preview=True)
+    return gen, prompts
+
+
+def test_kb_mode_open_window_ai_writes_from_the_facts_never_the_raw_text():
+    gen, prompts = _run_generation(_kb_campaign(), KB_TEXT, _open_lead())
+    assert gen.ok and gen.message == AI_MESSAGE
+    assert gen.content_source == "ai_freeform" and gen.input_tokens == 500
+    assert "agent_knowledge_base" in (gen.knowledge_sources_used or [])
+    system = prompts[0][0]["content"]
+    assert "SELECTED CAMPAIGN KNOWLEDGE (facts you may use" in system and "GBP 20" in system
+    assert "never copy this text" in system
+    for leaked in ("--- From file", "Sample Knowledge Base", "must not assist students with cheating"):
+        assert leaked not in gen.message
+
+
+def test_kb_mode_with_empty_knowledge_stops_for_review_without_calling_the_model():
+    gen, prompts = _run_generation(_kb_campaign(), "", _open_lead())
+    assert not gen.ok and gen.error_category == "knowledge_base_empty" and gen.needs_manual_review
+    assert prompts == []
+
+
+def test_campaign_without_knowledge_still_gets_no_knowledge_in_the_prompt():
+    gen, prompts = _run_generation(_kb_campaign(scope="none"), "", _open_lead())
+    assert gen.ok and gen.message == AI_MESSAGE
+    assert "SELECTED CAMPAIGN KNOWLEDGE:\n(none)" in prompts[0][0]["content"]
+
+
+@pytest.mark.parametrize("body, variables, lead, expected", [
+    ("Hi {{1}}, exam season is approaching!", {"1": ""}, {"name": "Timiya Boniface"}, {"1": "Timiya"}),
+    ("Dear {{1}}, thanks", {"1": "  "}, {"name": "Rahul"}, {"1": "Rahul"}),
+    ("Hello, {{1}}! Welcome", {"1": ""}, {"name": ""}, {"1": "there"}),
+    ("Hi {{1}}", {"1": ""}, {"name": "+447700900123"}, {"1": "there"}),
+    ("Hey {{2}}, your order {{1}} shipped", {"1": "A12", "2": ""}, {"name": "Ayisha K"}, {"1": "A12", "2": "Ayisha"}),
+    ("Hi {{1}}, exam season", {"1": "Timiya"}, {"name": "Rahul"}, {"1": "Timiya"}),  # typed value kept
+])
+def test_blank_greeting_variable_gets_the_contacts_first_name(body, variables, lead, expected):
+    from app.services.ai_campaign import fill_blank_greeting_variables
+
+    assert fill_blank_greeting_variables(variables, lead=lead, template_body=body) == expected
+
+
+@pytest.mark.parametrize("body, variables", [
+    ("Your appointment is on {{1}}.", {"1": ""}),          # not a greeting → never guess
+    ("Hi {{1}}, your code is {{2}}", {"1": "Ann", "2": ""}),
+    ("", {"1": ""}),                                       # template body unavailable
+])
+def test_other_blank_variables_stop_with_a_clear_error(body, variables):
+    from app.services.ai_campaign import fill_blank_greeting_variables
+
+    with pytest.raises(ValueError, match=r"Template variable \{\{\d\}\} is empty"):
+        fill_blank_greeting_variables(variables, lead={"name": "Ann"}, template_body=body)
+
+
+def test_no_variables_pass_through_untouched():
+    from app.services.ai_campaign import fill_blank_greeting_variables
+
+    assert fill_blank_greeting_variables(None, lead={}, template_body="x") is None
+    assert fill_blank_greeting_variables({}, lead={}, template_body="x") == {}
 
 
 def test_topic_matched_uncertain_uses_no_unrelated_kb():

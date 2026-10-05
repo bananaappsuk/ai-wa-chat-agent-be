@@ -715,6 +715,21 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                     )
                     if not body and info.get("body"):
                         body = info["body"]
+                if not ai_mode and isinstance(content_variables, dict) and any(
+                    not str(v or "").strip() for v in content_variables.values()
+                ):
+                    from app.services.ai_campaign import fill_blank_greeting_variables
+
+                    try:
+                        tpl_body = (twilio_service.get_content_template_info(content_sid) or {}).get("body") or ""
+                    except Exception:
+                        tpl_body = ""
+                    try:
+                        content_variables = fill_blank_greeting_variables(
+                            content_variables, lead=lead, template_body=tpl_body
+                        )
+                    except ValueError as var_exc:
+                        raise RuntimeError(str(var_exc)) from var_exc
                 result = twilio_service.send_whatsapp(
                     phone,
                     content_sid=content_sid,
