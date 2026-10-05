@@ -1340,6 +1340,18 @@ def _process_blast_recipient(
                     },
                 )
             elif content_sid:
+                if isinstance(content_variables, dict) and any(
+                    not str(v or "").strip() for v in content_variables.values()
+                ):
+                    # Twilio rejects empty variables: greet each contact by first name, else stop clearly.
+                    from app.services.ai_campaign import fill_blank_greeting_variables, template_body
+
+                    try:
+                        content_variables = fill_blank_greeting_variables(
+                            content_variables, lead=lead or {}, template_body=template_body(content_sid)
+                        )
+                    except ValueError as var_exc:
+                        raise RuntimeError(str(var_exc)) from var_exc
                 result = twilio_service.send_whatsapp(
                     phone, content_sid=content_sid, content_variables=content_variables
                 )

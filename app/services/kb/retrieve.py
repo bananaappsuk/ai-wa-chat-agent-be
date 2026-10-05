@@ -234,6 +234,11 @@ def retrieve_for_reply(
     ctx = KBContext(kb_ids=owned)
     if not owned:
         return ctx
+    # Linked knowledge bases with no content yet must not hide the agent's own pasted knowledge.
+    if (agent or {}).get("knowledge_base") and not db.kb_chunks.find_one(
+        {"user_id": user_id, "kb_id": {"$in": owned}}, {"_id": 1}
+    ):
+        return None
     latest = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
     if is_small_talk(latest):
         return ctx

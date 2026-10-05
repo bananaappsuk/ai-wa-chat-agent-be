@@ -573,7 +573,7 @@ def _kb_campaign(scope="selected"):
     }
 
 
-def _run_generation(campaign, knowledge, lead, reply_text=AI_MESSAGE):
+def _run_generation(campaign, knowledge, lead, reply_text=AI_MESSAGE, business="", company="Smart Study Academy"):
     """generate_campaign_content with the model mocked; returns (result, prompts sent to the model)."""
     import json
     from types import SimpleNamespace
@@ -590,10 +590,11 @@ def _run_generation(campaign, knowledge, lead, reply_text=AI_MESSAGE):
                                error_category=None)
 
     db = MagicMock()
-    db.users.find_one.return_value = {"_id": "u1", "company_name": "Smart Study Academy"}
+    db.users.find_one.return_value = {"_id": "u1", "company_name": company}
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("app.services.ai_campaign.get_campaign_agent",
-                   lambda *a, **k: {"_id": "a1", "name": "AI Exam Revision Coach", "knowledge_base": knowledge})
+                   lambda *a, **k: {"_id": "a1", "name": "AI Exam Revision Coach", "knowledge_base": knowledge,
+                                    "business_description": business})
         mp.setattr("app.services.ai_campaign.resolve_campaign_knowledge",
                    lambda *a, **k: (knowledge, ["agent_knowledge_base"] if knowledge else [], {}))
         mp.setattr("app.services.ai_campaign.resolve_ai_settings",
@@ -628,6 +629,18 @@ def test_campaign_without_knowledge_still_gets_no_knowledge_in_the_prompt():
     gen, prompts = _run_generation(_kb_campaign(scope="none"), "", _open_lead())
     assert gen.ok and gen.message == AI_MESSAGE
     assert "SELECTED CAMPAIGN KNOWLEDGE:\n(none)" in prompts[0][0]["content"]
+
+
+def test_campaign_speaks_for_the_agents_own_business_not_the_tenant_account():
+    gen, prompts = _run_generation(_kb_campaign(scope="none"), "", _open_lead(),
+                                   business="Smart Study Academy", company="NextGen Techs")
+    system = prompts[0][0]["content"]
+    assert '"company": "Smart Study Academy"' in system and "NextGen Techs" not in system
+
+
+def test_campaign_without_agent_business_uses_the_tenant_company():
+    gen, prompts = _run_generation(_kb_campaign(scope="none"), "", _open_lead(), business="", company="NextGen Techs")
+    assert '"company": "NextGen Techs"' in prompts[0][0]["content"]
 
 
 @pytest.mark.parametrize("body, variables, lead, expected", [

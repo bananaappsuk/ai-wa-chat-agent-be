@@ -23,6 +23,15 @@ def db():
     return mongomock.MongoClient().db
 
 
+@pytest.fixture(autouse=True)
+def fresh_template_cache():
+    from app.services import ai_campaign
+
+    ai_campaign._TEMPLATE_BODY_CACHE.clear()
+    yield
+    ai_campaign._TEMPLATE_BODY_CACHE.clear()
+
+
 def _setup(db, *, variables, lead_name="Timiya Boniface"):
     now = datetime.now(timezone.utc)
     db.users.insert_one({"_id": ObjectId(UID), "email": "t@example.com", "plan": "business",
@@ -79,3 +88,61 @@ def test_blank_non_greeting_variable_fails_clearly_without_calling_twilio(db):
     assert sent == []
     assert rec["status"] == "failed"  # not "retrying" — retrying can't fix a blank variable
     assert "Template variable {{1}} is empty" in rec["error_message"]
+
+
+# ── WA Blast page: same rule, through the real blast sender ─────────────────────────────
+
+def _blast_send(db, *, variables, body=GREETING_BODY, lead_name="Timiya Boniface"):
+    from app.workers import tasks
+
+    now = datetime.now(timezone.utc)
+    db.users.insert_one({"_id": ObjectId(UID), "email": "t@example.com", "plan": "business",
+                         "subscription_status": "active"})
+    db.leads.insert_one({"user_id": UID, "phone": "+447887190718", "name": lead_name,
+                         "whatsapp_consent_status": "opted_in", "last_inbound_at": now, "blacklisted": False})
+    blast = {"_id": ObjectId(), "user_id": UID, "provider": "twilio", "content_sid": SID,
+             "content_variables": variables, "message_purpose": "conversational", "status": "running"}
+    db.blast_campaigns.insert_one(blast)
+    rid = db.blast_recipients.insert_one({"blast_id": str(blast["_id"]), "user_id": UID, "phone": "+447887190718",
+                                          "status": "pending", "attempt_count": 0, "created_at": now}).inserted_id
+    sent = []
+
+    def fake_send(phone, **kw):
+        sent.append({"phone": phone, **kw})
+        return {"sid": "SMfakeblast", "status": "queued", "provider_message_id": "SMfakeblast"}
+
+    with patch.object(tasks.twilio_service, "send_whatsapp", side_effect=fake_send), \
+         patch.object(tasks.twilio_service, "get_content_template_info",
+                      return_value={"body": body, "whatsapp_status": "approved"}), \
+         patch.object(tasks, "acquire_send_permit", return_value=True):
+        tasks._process_blast_recipient(db, UID, db.blast_recipients.find_one({"_id": rid}), blast=blast,
+                                       body=None, media_url=None, content_sid=SID,
+                                       content_variables=variables, purpose="conversational")
+    return sent, db.blast_recipients.find_one({"_id": rid})
+
+
+def test_blast_blank_name_variable_is_sent_as_the_contacts_first_name(db):
+    sent, rec = _blast_send(db, variables={"1": ""})
+    assert len(sent) == 1 and sent[0]["content_variables"] == {"1": "Timiya"}
+    assert rec["status"] == "sent"
+
+
+def test_blast_typed_variable_is_sent_unchanged(db):
+    sent, rec = _blast_send(db, variables={"1": "All"})
+    assert sent[0]["content_variables"] == {"1": "All"} and rec["status"] == "sent"
+
+
+def test_blast_blank_non_greeting_variable_fails_clearly_without_calling_twilio(db):
+    sent, rec = _blast_send(db, variables={"1": ""}, body="Your appointment is on {{1}}.")
+    assert sent == []
+    assert rec["status"] == "failed" and "Template variable {{1}} is empty" in rec["error"]
+
+
+def test_template_body_is_fetched_once_per_template(db):
+    from app.services import ai_campaign
+
+    with patch.object(ai_campaign, "_TEMPLATE_BODY_CACHE", {}), \
+         patch("app.services.twilio_service.get_content_template_info", return_value={"body": "Hi {{1}}"}) as info:
+        assert ai_campaign.template_body(SID) == "Hi {{1}}"
+        assert ai_campaign.template_body(SID) == "Hi {{1}}"
+    assert info.call_count == 1

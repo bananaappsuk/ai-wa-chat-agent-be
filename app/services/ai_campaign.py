@@ -800,6 +800,27 @@ def prepare_template_variables_for_send(
     return _crm_variable_fallback(declared, lead, campaign)
 
 
+_TEMPLATE_BODY_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def template_body(content_sid: str) -> str:
+    """Approved Twilio template body, cached 10 minutes per process (one lookup per blast or
+    campaign, not one per recipient). "" when it can't be fetched."""
+    import time
+
+    hit = _TEMPLATE_BODY_CACHE.get(content_sid)
+    if hit and time.monotonic() - hit[0] < 600:
+        return hit[1]
+    try:
+        from app.services import twilio_service
+
+        body = (twilio_service.get_content_template_info(content_sid) or {}).get("body") or ""
+    except Exception:
+        return ""
+    _TEMPLATE_BODY_CACHE[content_sid] = (time.monotonic(), body)
+    return body
+
+
 _GREETING_VAR = r"\b(?:hi|hello|hey|hiya|dear|welcome)\s*,?\s*\{\{\s*%s\s*\}\}"
 
 
@@ -978,7 +999,10 @@ def generate_campaign_content(
     temperature = campaign.get("ai_temperature_override")
     temperature = float(ai.get("temperature") or 0.5) if temperature is None else min(float(temperature), 1.5)
 
-    company = (user or {}).get("company_name")
+    # An agent with its own business speaks for it, not for the tenant account (as in replies).
+    company = sanitize_text((agent_doc or {}).get("business_description") or "", max_len=200) or (user or {}).get(
+        "company_name"
+    )
     system = build_campaign_prompt_sections(
         campaign=campaign,
         snap=snap,
