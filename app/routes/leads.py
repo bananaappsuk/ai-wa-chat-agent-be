@@ -411,10 +411,13 @@ async def delete_lead(lead_id: str, user: dict = Depends(current_user)) -> None:
 async def pause_ai(lead_id: str, user: dict = Depends(current_user)) -> dict:
     require_object_id(lead_id)
     user_id = str(user["_id"])
-    doc = await lead_service.set_lead_control(user_id, lead_id, {"ai_paused": True})
+    doc = await lead_service.set_lead_control(
+        user_id, lead_id, {"ai_paused": True, "ai_paused_at": utcnow(), "ai_paused_by": user_id}
+    )
     if not doc:
         raise HTTPException(status_code=404, detail="Not found")
     audit("lead.ai_pause", user_id=user_id, target_id=lead_id, request_id=get_request_id())
+    await lead_service.record_ai_control(get_db(), user_id, lead_id, paused=True)
     return await _publish_lead(user_id, doc)
 
 
@@ -423,10 +426,13 @@ async def resume_ai(lead_id: str, user: dict = Depends(current_user)) -> dict:
     """Resume AI replies. Does not clear an active human takeover — use handback for that."""
     require_object_id(lead_id)
     user_id = str(user["_id"])
-    doc = await lead_service.set_lead_control(user_id, lead_id, {"ai_paused": False})
+    doc = await lead_service.set_lead_control(
+        user_id, lead_id, {"ai_paused": False, "ai_paused_at": None, "ai_paused_by": None}
+    )
     if not doc:
         raise HTTPException(status_code=404, detail="Not found")
     audit("lead.ai_resume", user_id=user_id, target_id=lead_id, request_id=get_request_id())
+    await lead_service.record_ai_control(get_db(), user_id, lead_id, paused=False)
     return await _publish_lead(user_id, doc)
 
 
@@ -481,6 +487,8 @@ async def hand_back(lead_id: str, user: dict = Depends(current_user)) -> dict:
         lead_id,
         {
             "ai_paused": False,
+            "ai_paused_at": None,
+            "ai_paused_by": None,
             "needs_human": False,
             "takeover_by": None,
             "takeover_at": None,

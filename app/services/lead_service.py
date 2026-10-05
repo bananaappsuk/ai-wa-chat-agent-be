@@ -181,11 +181,28 @@ async def delete_lead(user_id: str, lead_id: str) -> bool:
     return bool(res.deleted_count)
 
 
+async def record_ai_control(db, user_id: str, lead_id: str, *, paused: bool, bulk: bool = False) -> None:
+    """Activity entry for AI pause/resume — a paused contact gets no automatic replies, so
+    who switched it and when must be traceable in the app, not only in server logs."""
+    from app.services.activity import record_activity
+
+    await record_activity(
+        db,
+        tenant_id=user_id,
+        event_type="lead.ai_pause" if paused else "lead.ai_resume",
+        summary=("AI paused for this contact" if paused else "AI resumed for this contact") + (" (bulk)" if bulk else ""),
+        actor_id=user_id,
+        resource_type="lead",
+        resource_id=lead_id,
+    )
+
+
 def lead_control_payload(doc: dict) -> dict:
     s = serialize(doc)
     return {
         "id": s["id"],
         "ai_paused": bool(s.get("ai_paused")),
+        "ai_paused_at": s.get("ai_paused_at"),
         "needs_human": bool(s.get("needs_human")),
         "takeover_by": s.get("takeover_by"),
         "takeover_at": s.get("takeover_at"),

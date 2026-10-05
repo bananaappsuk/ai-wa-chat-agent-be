@@ -62,6 +62,7 @@ async def run_bulk_action(
     now = utcnow()
 
     from app.services.lead_scoring import recalculate_lead_score
+    from app.services.lead_service import record_ai_control
 
     for oid in oids:
         lead = await db.leads.find_one({"_id": oid, "user_id": user_id})
@@ -99,13 +100,15 @@ async def run_bulk_action(
             elif action == "pause_ai":
                 await db.leads.update_one(
                     {"_id": oid, "user_id": user_id},
-                    {"$set": {"ai_paused": True, "updated_at": now}},
+                    {"$set": {"ai_paused": True, "ai_paused_at": now, "ai_paused_by": user_id, "updated_at": now}},
                 )
+                await record_ai_control(db, user_id, lead_id, paused=True, bulk=True)
             elif action == "resume_ai":
                 await db.leads.update_one(
                     {"_id": oid, "user_id": user_id},
-                    {"$set": {"ai_paused": False, "updated_at": now}},
+                    {"$set": {"ai_paused": False, "ai_paused_at": None, "ai_paused_by": None, "updated_at": now}},
                 )
+                await record_ai_control(db, user_id, lead_id, paused=False, bulk=True)
             elif action == "mark_needs_human":
                 await db.leads.update_one(
                     {"_id": oid, "user_id": user_id},

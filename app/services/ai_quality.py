@@ -13,6 +13,15 @@ _SECRETISH = re.compile(r"(sk-[A-Za-z0-9]{16,}|api[_-]?key\s*[:=]|BEGIN PRIVATE 
 _PROMPT_LEAK = re.compile(r"(CORE RULES|SYSTEM PROMPT|<<<USER_MESSAGE>>>|TENANT CUSTOM INSTRUCTIONS)", re.I)
 _TEMPLATE_LEAK = re.compile(r"\{\{[^{}]+\}\}|\[\[[^\[\]]+\]\]")
 _PRICE = re.compile(r"(?:£|\$|€)\s?(\d+(?:\.\d{1,2})?)")
+_MD_LINK = re.compile(r"\[([^\[\]\n]{1,200})\]\((https?://[^\s)]+)\)")
+
+
+def _plain_link(m: re.Match) -> str:
+    """WhatsApp doesn't render [text](url): keep the words and the bare URL (WhatsApp links it)."""
+    label, url = m.group(1).strip(), m.group(2)
+    if not label or label.rstrip("/") == url.rstrip("/") or ("." in label and label.lower() in url.lower()):
+        return url
+    return f"{label}: {url}"
 
 
 @dataclass
@@ -25,6 +34,7 @@ class QualityResult:
 
 def post_process(text: str) -> str:
     t = (text or "").strip()
+    t = _MD_LINK.sub(_plain_link, t)
     t = t.replace("**", "").replace("__", "")
     t = re.sub(r"^#+\s*", "", t, flags=re.M)
     t = re.sub(r"\|.+\|", "", t)  # strip markdown tables roughly
