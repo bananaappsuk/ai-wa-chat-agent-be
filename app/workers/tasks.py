@@ -596,9 +596,25 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
 
 
 _DEFERRAL = re.compile(
-    r"\b(check|confirm|pass|forward|refer|escalat\w*|connect|find out)\b[^.?!]{0,40}\b(team|colleague|someone|a person|human|expert)",
+    # "I'll check / confirm / get you in touch … with the (admissions) team"
+    r"\b(check|confirm|pass|forward|refer|escalat\w*|connect|find out|get (?:you )?in touch|put you in touch|arrange)\b"
+    r"[^.?!]{0,60}\b(team|colleague|someone|a person|human|expert|admissions|staff)"
+    # "the (admissions) team will confirm / get back to you"
+    r"|\b(team|admissions|colleague|someone|staff)\b[^.?!]{0,25}\b(?:will|can|would|should|is going to)\s+"
+    r"(?:\w+\s+){0,2}?(confirm|check|get back|follow up|be in touch|contact|reach out|call)",
     re.I,
 )
+# The customer asking for a person always reaches the team, whatever the AI replied.
+_ASKS_FOR_PERSON = re.compile(
+    r"\b(?:talk|speak|chat)\s+(?:to|with)\s+(?:a\s+|an\s+|the\s+|your\s+)?(?:real\s+|actual\s+|live\s+)?"
+    r"(?:person|human|someone|somebody|agent|staff|team|admissions|manager|representative|advisor|adviser)\b"
+    r"|\b(?:real|actual|live)\s+(?:person|human)\b|\bcall\s+me\b|\b(?:can|could)\s+someone\s+(?:call|contact|phone)\b",
+    re.I,
+)
+
+
+def _asks_for_person(text: str) -> bool:
+    return bool(_ASKS_FOR_PERSON.search(text or ""))
 
 
 def _needs_team_followup(kb_ctx, reply: str, live=None) -> bool:
@@ -896,6 +912,7 @@ def generate_and_send_ai_reply(
             neutral_topics=route.topics,
             kb_context=kb_ctx,
             live_lookup=live,
+            first_message=ctx.get("first_customer_message"),
         )
     except Exception as exc:
         logger.exception(
@@ -1072,13 +1089,16 @@ def generate_and_send_ai_reply(
         )
         # A reply that defers ("I'll check with the team") must reach a person — otherwise it's
         # an empty promise. Flag the conversation; any other successful reply clears the flag.
-        handoff = _needs_team_followup(kb_ctx, reply, live)
+        asked_for_person = _asks_for_person(inbound_text)
+        handoff = asked_for_person or _needs_team_followup(kb_ctx, reply, live)
         db.leads.update_one(
             {"_id": ObjectId(lead_id)},
             {
                 "$set": {
                     "needs_human": handoff,
-                    "needs_human_reason": "ai_deferred_to_team" if handoff else None,
+                    "needs_human_reason": (
+                        "customer_asked_for_person" if asked_for_person else "ai_deferred_to_team" if handoff else None
+                    ),
                     "last_ai_error_category": None,
                     "updated_at": datetime.now(timezone.utc),
                 }
@@ -1089,8 +1109,12 @@ def generate_and_send_ai_reply(
                 db,
                 user_id=user_id,
                 type="needs_human",
-                title="A customer is waiting for an answer",
-                message=f"The AI promised to check with the team: \"{inbound_text[:140]}\"",
+                title="A customer wants to talk to a person" if asked_for_person else "A customer is waiting for an answer",
+                message=(
+                    f"The customer asked for a person: \"{inbound_text[:140]}\""
+                    if asked_for_person
+                    else f"The AI promised to check with the team: \"{inbound_text[:140]}\""
+                ),
                 resource_type="lead",
                 resource_id=lead_id,
                 dedupe_key=f"ai_deferred:{lead_id}:{datetime.now(timezone.utc).strftime('%Y%m%d%H')}",
@@ -1220,6 +1244,55 @@ def _finalize_blast(db, user_id: str, blast_id: str) -> None:
     _recount_blast(db, user_id, blast_id)
 
 
+def blast_chat_text(*, content_sid: Optional[str], content_variables: Optional[dict], body: Optional[str],
+                    media_url: Optional[str], template_name: Optional[str] = None) -> str:
+    """What the contact actually received, for their chat history (and the AI's context)."""
+    if content_sid:
+        from app.services.ai_campaign import template_body
+
+        text = template_body(content_sid)
+        for k, v in (content_variables or {}).items():
+            text = text.replace("{{" + str(k) + "}}", str(v))
+        return text or f"Template: {template_name or content_sid}"
+    if template_name:
+        return f"Template: {template_name}"
+    return (body or "").strip() or ("[media]" if media_url else "")
+
+
+def record_blast_in_chat(db, *, user_id: str, lead: Optional[dict], blast: dict, text: str, provider: str,
+                         provider_message_id: Optional[str], status: str, purpose: str,
+                         content_sid: Optional[str], content_variables: Optional[dict]) -> None:
+    """Blasts go into the contact's conversation like any other outbound message, so Live Chat
+    shows them and the AI knows what a reply is answering. Never breaks the send."""
+    if not lead or not text:
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        doc = {
+            "user_id": user_id,
+            "lead_id": str(lead["_id"]),
+            "direction": "outbound",
+            "message": text,
+            "status": status or "sent",
+            "provider": provider,
+            "provider_message_id": provider_message_id,
+            "twilio_sid": provider_message_id if provider == "twilio" else None,
+            "message_type": "template" if content_sid else "text",
+            "content_sid": content_sid,
+            "content_variables": content_variables,
+            "blast_id": str(blast.get("_id")) if blast.get("_id") else None,
+            "blast_name": blast.get("name"),
+            "message_purpose": purpose,
+            "sender_type": "human",
+            "created_at": now,
+            "updated_at": now,
+        }
+        doc["_id"] = db.messages.insert_one(doc).inserted_id
+        _publish(user_id, "message:new", _serialize(doc))
+    except Exception:
+        logger.warning("blast message not saved to chat user_id=%s", user_id, exc_info=True)
+
+
 def _process_blast_recipient(
     db,
     user_id: str,
@@ -1325,6 +1398,13 @@ def _process_blast_recipient(
                     components=components,
                     user=user,
                 )
+                record_blast_in_chat(
+                    db, user_id=user_id, lead=lead, blast=blast,
+                    text=blast_chat_text(content_sid=None, content_variables=None, body=None, media_url=None,
+                                         template_name=tmpl.get("name") or tmpl.get("meta_template_name")),
+                    provider="meta", provider_message_id=result.get("provider_message_id"), status="sent",
+                    purpose=purpose, content_sid=None, content_variables=content_variables,
+                )
                 db.blast_recipients.update_one(
                     {"_id": recipient["_id"]},
                     {
@@ -1367,6 +1447,13 @@ def _process_blast_recipient(
                     "sent"
                     if provider_status in ("", "queued", "accepted", "sending")
                     else provider_status
+                )
+                record_blast_in_chat(
+                    db, user_id=user_id, lead=lead, blast=blast,
+                    text=blast_chat_text(content_sid=content_sid, content_variables=content_variables, body=body,
+                                         media_url=media_url),
+                    provider="twilio", provider_message_id=result.get("sid"), status=app_status,
+                    purpose=purpose, content_sid=content_sid, content_variables=content_variables,
                 )
                 db.blast_recipients.update_one(
                     {"_id": recipient["_id"]},

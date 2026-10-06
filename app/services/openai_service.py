@@ -54,6 +54,7 @@ def generate_reply(
     kb_context=None,
     neutral_topics: Optional[list[str]] = None,
     live_lookup=None,
+    first_message: Optional[str] = None,
 ) -> str:
     ai = ai_settings or resolve_ai_settings(user)
     if not ai.get("enabled"):
@@ -72,6 +73,7 @@ def generate_reply(
         neutral_topics=neutral_topics,
         live_lookup=live_lookup,
         local_timezone=(user or {}).get("timezone"),
+        first_message=first_message,
     )
     ctx_msgs = []
     for m in history[-int(settings.AI_MAX_CONTEXT_MESSAGES or settings.OPENAI_MAX_HISTORY) :]:

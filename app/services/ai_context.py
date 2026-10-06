@@ -15,7 +15,7 @@ BUSINESS_INITIATED_PURPOSES = frozenset({"campaign", "marketing", "transactional
 def is_business_initiated(doc: Optional[dict]) -> bool:
     if not doc or doc.get("direction") == "inbound":
         return False
-    return bool(doc.get("campaign_id")) or (doc.get("message_purpose") in BUSINESS_INITIATED_PURPOSES)
+    return bool(doc.get("campaign_id") or doc.get("blast_id")) or (doc.get("message_purpose") in BUSINESS_INITIATED_PURPOSES)
 
 
 def _as_utc(dt) -> Optional[datetime]:
@@ -133,6 +133,28 @@ def load_conversation_context(
             if len(messages) >= limit:
                 break
 
+    # When older messages fell out of the window, keep the conversation's first customer message
+    # available so "what did I ask first?" is answered correctly in long chats.
+    first_customer_message = None
+    if truncated or len(raw) >= limit * 2:
+        shown = {m["message_id"] for m in messages}
+        history = list(
+            db.messages.find(
+                {
+                    "user_id": tenant_id,
+                    "lead_id": lead_id,
+                    "status": {"$nin": ["failed", "canceled", "cancelled"]},
+                    "message_purpose": {"$nin": ["opt_out_confirmation"]},
+                }
+            )
+            .sort("created_at", -1)
+            .limit(500)
+        )
+        session = current_session(list(reversed(history)), session_gap_hours)
+        first = next((d for d in session if d.get("direction") == "inbound" and _msg_text(d)), None)
+        if first is not None and str(first.get("_id")) not in shown:
+            first_customer_message = _msg_text(first)[:500]
+
     est = sum(estimate_tokens(m["content"]) for m in messages)
     if summary and truncated:
         est += estimate_tokens(summary)
@@ -146,4 +168,5 @@ def load_conversation_context(
         "max_messages": limit,
         "max_chars": max_c,
         "summary": summary if (summary and truncated) else (summary or None),
+        "first_customer_message": first_customer_message,
     }

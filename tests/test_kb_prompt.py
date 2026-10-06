@@ -134,3 +134,39 @@ def test_knowledge_gap_is_always_flagged():
 
     assert _needs_team_followup(KBContext(kb_ids=["k"], searched=True, hits=[]), "Sure!") is True
     assert _needs_team_followup(KBContext(kb_ids=["k"], searched=True, hits=[_hit("x")]), "Here you go.") is False
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("The admissions team will confirm how the discount is applied.", True),
+    ("I'll confirm the exact payment split with the admissions team.", True),
+    ("The admissions team will confirm whether the £49 reservation fee counts towards the total course fee.", True),
+    ("I can help you get in touch with the admissions team. Would you like that?", True),
+    ("Our team will get back to you shortly.", True),
+    ("The team can confirm if any other courses are available.", True),
+    ("Our team covers AI governance, CI/CD and regression testing.", False),
+    ("The course team designed 8 practical modules.", False),
+    ("You get CV and LinkedIn support from our career team.", False),
+    ("You can check the batch timings on our website.", False),
+])
+def test_more_hand_off_phrasings_are_recognised(reply, expected):
+    from app.workers.tasks import _needs_team_followup
+
+    assert _needs_team_followup(None, reply) is expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("can I talk to a real person?", True),
+    ("I want to speak with someone from admissions", True),
+    ("can I chat with your team", True),
+    ("please call me", True),
+    ("could someone call me tomorrow?", True),
+    ("is there a live person here?", True),
+    ("what's the course about?", False),
+    ("I talked to my manager about the fee", False),
+    ("the human resources course?", False),
+    ("are you a bot?", False),
+])
+def test_customer_asking_for_a_person_is_recognised(text, expected):
+    from app.workers.tasks import _asks_for_person
+
+    assert _asks_for_person(text) is expected

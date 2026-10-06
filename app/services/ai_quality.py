@@ -12,7 +12,7 @@ _URL = re.compile(r"https?://[^\s]+", re.I)
 _SECRETISH = re.compile(r"(sk-[A-Za-z0-9]{16,}|api[_-]?key\s*[:=]|BEGIN PRIVATE KEY)", re.I)
 _PROMPT_LEAK = re.compile(r"(CORE RULES|SYSTEM PROMPT|<<<USER_MESSAGE>>>|TENANT CUSTOM INSTRUCTIONS)", re.I)
 _TEMPLATE_LEAK = re.compile(r"\{\{[^{}]+\}\}|\[\[[^\[\]]+\]\]")
-_PRICE = re.compile(r"(?:£|\$|€)\s?(\d+(?:\.\d{1,2})?)")
+_PRICE = re.compile(r"(?:£|\$|€)\s?(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)")  # "£1,000" = 1000
 _MD_LINK = re.compile(r"\[([^\[\]\n]{1,200})\]\((https?://[^\s)]+)\)")
 
 
@@ -80,7 +80,7 @@ def validate_output(
     if price_floor is not None or price_ceiling is not None:
         for m in _PRICE.finditer(cleaned):
             try:
-                val = float(m.group(1))
+                val = float(m.group(1).replace(",", ""))
             except ValueError:
                 continue
             if price_floor is not None and val < float(price_floor):

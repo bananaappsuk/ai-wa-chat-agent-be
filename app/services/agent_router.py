@@ -148,6 +148,8 @@ def conversation_turns(db, user_id: str, lead_id: str, limit: int = _CONTEXT_TUR
                 campaign_agents[cid] = (ag or {}).get("name") or ""
             name = campaign_agents[cid]
             label = f"Campaign message from {name}" if name else "Campaign message"
+        elif d.get("blast_id"):
+            label = "Broadcast message from the business"
         else:
             label = name or ("Business" if d.get("sender_type") == "human" else "General assistant")
         turns.append({"who": label, "text": text})

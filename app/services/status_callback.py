@@ -219,6 +219,15 @@ async def apply_twilio_status_callback(
                             )
                     except Exception:
                         logger.exception("message failure notification failed")
+        # Blasts are also saved in the chat with the same SID — keep the blast's stats in step.
+        for recipient in await db.blast_recipients.find({"twilio_sid": twilio_sid}).to_list(length=20):
+            await _update_blast_recipient(
+                db,
+                recipient,
+                status_raw=status_raw,
+                error_code=error_code,
+                error_message=error_message,
+            )
         # Campaign engine stores the same Twilio SID on campaign_recipients
         camp_recipients = await db.campaign_recipients.find({"twilio_sid": twilio_sid}).to_list(length=20)
         for recipient in camp_recipients:
