@@ -15,6 +15,14 @@ _SECRET_PATTERNS = (
 )
 
 
+_CREDENTIAL_HINT = re.compile(
+    r"\b(?:AC|SK)[0-9a-fA-F]{32}\b"              # Twilio account / API key SIDs
+    r"|auth[\s_-]?token|api[\s_-]?key"          # credential field names
+    r"|\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}",   # OpenAI / Anthropic style keys
+    re.I,
+)
+
+
 def mask_phone(phone: Optional[str]) -> str:
     raw = (phone or "").strip()
     if len(raw) < 6:
@@ -26,11 +34,10 @@ def sanitize_error_message(msg: str, *, max_len: int = 300) -> str:
     text = str(msg or "")[: max_len * 2]
     for pat in _SECRET_PATTERNS:
         text = pat.sub(r"\1[REDACTED]", text)
-    # Strip common credential-looking substrings
-    for needle in ("SK", "AC", "Auth Token", "api_key"):
-        if needle.lower() in text.lower() and len(text) > 40:
-            text = "External provider error"
-            break
+    # Hide provider errors that carry credentials (Twilio account/key SIDs, tokens, API keys).
+    # Plain-language messages (e.g. "approved fallback template required") must reach the user.
+    if _CREDENTIAL_HINT.search(text):
+        text = "External provider error"
     return text[:max_len]
 
 

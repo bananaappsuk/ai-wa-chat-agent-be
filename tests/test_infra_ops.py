@@ -183,3 +183,24 @@ def test_production_rejects_reload_unsafe_jwt():
     )
     with pytest.raises(RuntimeError):
         s.validate_for_startup()
+
+
+@pytest.mark.parametrize("msg", [
+    "An approved fallback/template is required for this delivery scope",
+    "No eligible recipients (consent_required). Opt in each lead under Live Chat → Lead Info → Opt in, then retry.",
+    "Cannot attach media to template campaigns",
+    "Campaign can only be edited before sending begins",
+])
+def test_plain_validation_messages_reach_the_user(msg):
+    assert sanitize_error_message(msg) == msg
+
+
+@pytest.mark.parametrize("msg", [
+    "Twilio error for account " + "AC" + "0123456789abcdef" * 2 + ": authenticate",  # built at runtime: no secret-shaped literal
+    "Unable to use key " + "SK" + "0123456789abcdef" * 2 + " for this request",
+    "Invalid Auth Token supplied to the provider endpoint",
+    "OpenAI rejected api_key provided for this organisation request",
+    "Incorrect API key provided: " + "sk-" + "proj-" + "abcdefghijklmnop1234 please check",
+])
+def test_provider_errors_with_credentials_are_hidden(msg):
+    assert sanitize_error_message(msg) == "External provider error"
