@@ -731,7 +731,14 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                     content_sid=content_sid,
                     content_variables=content_variables,
                 )
-                display = body or f"[template:{content_sid}]"
+                # Save what the contact actually received (rendered template), not a template ID,
+                # so Live Chat and the AI know what a reply is answering.
+                from app.services.ai_campaign import template_body
+
+                display = template_body(content_sid) or (body or "")
+                for _k, _v in (content_variables or {}).items():
+                    display = display.replace("{{" + str(_k) + "}}", str(_v))
+                display = display or f"[template:{content_sid}]"
             else:
                 if not is_whatsapp_window_open(lead):
                     raise RuntimeError(WINDOW_CLOSED_ERROR)
@@ -764,6 +771,7 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                     "policy_reason": elig.reason_code,
                     "template_id": str(template_id) if template_id else None,
                     "content_sid": content_sid,
+                    "content_variables": content_variables,
                     "created_at": _utcnow(),
                 }
                 if media_url:

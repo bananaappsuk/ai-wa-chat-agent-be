@@ -74,6 +74,9 @@ def test_blank_name_variable_is_sent_as_the_contacts_first_name(db):
     assert len(sent) == 1 and sent[0]["content_sid"] == SID
     assert sent[0]["content_variables"] == {"1": "Timiya"}
     assert rec["status"] == "sent" and not rec.get("error_message")
+    chat = db.messages.find_one({"campaign_id": cid})
+    assert chat["message"].startswith("Hi Timiya, exam season is approaching!")  # real text, not "[template:HX…]"
+    assert chat["content_variables"] == {"1": "Timiya"}
 
 
 def test_typed_variable_is_sent_unchanged(db):
