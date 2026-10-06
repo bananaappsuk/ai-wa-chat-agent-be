@@ -33,6 +33,25 @@ GROUNDED_REMINDER = (
     "give THOSE items in their order and wording — never swap in a generic or 'typical' version. "
     "For anything the results don't cover, say you'll check with the team."
 )
+# Same rules when the agent also has its own pasted KNOWLEDGE BASE text — the two work together.
+GROUNDED_WITH_TEXT_REMINDER = (
+    "Before you reply: state facts about the business only if they appear in the KNOWLEDGE BASE "
+    "RESULTS or the KNOWLEDGE BASE text — answer from whichever has the detail; something in only "
+    "one of them still counts. When they describe what was asked (steps, a process, a list, prices, "
+    "dates), give THOSE items in their order and wording — never swap in a generic or 'typical' "
+    "version. If neither mentions it, do NOT answer yes or no — never say the business does or "
+    "doesn't offer, provide or include it (not even 'we don't provide that' or 'you'll need your "
+    "own'); say you don't have that detail to hand and offer to check with the team."
+)
+NO_MATCH_WITH_TEXT_REMINDER = (
+    "Before you reply: no document matched the customer's last message — answer from the KNOWLEDGE "
+    "BASE text if it covers it. If it doesn't, and they asked whether the business offers, provides "
+    "or includes something, or about its prices, duration, dates, certificates, locations, refunds, "
+    "discounts or any other specific, do NOT answer yes or no and do NOT state a value (not even "
+    "'we don't provide that') — say you don't have that detail to hand and offer to check with the "
+    "team. You can still greet, chat, or explain general concepts."
+)
+_KNOWLEDGE_REMINDERS = (GROUNDED_REMINDER, NO_MATCH_REMINDER, GROUNDED_WITH_TEXT_REMINDER, NO_MATCH_WITH_TEXT_REMINDER)
 
 
 def build_system_prompt(agent: Optional[dict], company: Optional[str] = None) -> str:
@@ -89,11 +108,15 @@ def generate_reply(
     if kb_context is not None and getattr(kb_context, "searched", False):
         # A last-position reminder is followed far more reliably than the same rule buried in
         # a long system prompt — this is what stops "yes, we offer that" when nothing matched.
-        messages.append({"role": "system", "content": GROUNDED_REMINDER if kb_context.hits else NO_MATCH_REMINDER})
+        if (agent or {}).get("knowledge_base"):
+            reminder = GROUNDED_WITH_TEXT_REMINDER if kb_context.hits else NO_MATCH_WITH_TEXT_REMINDER
+        else:
+            reminder = GROUNDED_REMINDER if kb_context.hits else NO_MATCH_REMINDER
+        messages.append({"role": "system", "content": reminder})
     elif kb_context is not None and getattr(kb_context, "error", None) and not (agent or {}).get("knowledge_base"):
         # Lookup failed and there's no pasted fallback knowledge — same rule as "nothing matched".
         messages.append({"role": "system", "content": NO_MATCH_REMINDER})
-    if live_lookup is not None and getattr(live_lookup, "ok", False) and messages[-1]["content"] in (GROUNDED_REMINDER, NO_MATCH_REMINDER):
+    if live_lookup is not None and getattr(live_lookup, "ok", False) and messages[-1]["content"] in _KNOWLEDGE_REMINDERS:
         # The knowledge reminder above is about business facts — not the weather just looked up.
         messages.append({"role": "system", "content": LIVE_REMINDER})
     lead_oid = (lead or {}).get("_id") or (lead or {}).get("id")

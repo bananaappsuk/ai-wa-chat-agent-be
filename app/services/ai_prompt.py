@@ -105,10 +105,13 @@ SUMMARY_LABEL = (
 )
 
 
-def format_kb_context(kb_context) -> str:
-    """Prompt block for retrieved knowledge. Empty when retrieval was skipped (small talk)."""
+def format_kb_context(kb_context, *, with_text: bool = False) -> str:
+    """Prompt block for retrieved knowledge. Empty when retrieval was skipped (small talk).
+    `with_text`: the agent's own pasted knowledge is also in the prompt — the two work together."""
     if kb_context is None or not getattr(kb_context, "searched", False):
         return ""
+    if with_text:
+        return _format_kb_with_text(kb_context)
     if not kb_context.hits:
         return (
             "KNOWLEDGE BASE: nothing in this business's knowledge base matched the customer's latest "
@@ -127,6 +130,44 @@ def format_kb_context(kb_context) -> str:
         "certificates, locations, formats, discounts, refunds, named clients) — say you'll check with "
         "the team. Quote prices, numbers and units exactly as written — never add or change a "
         "currency. Don't mention 'the knowledge base'."
+    ]
+    for i, h in enumerate(kb_context.hits, start=1):
+        head = " — ".join(x for x in (h.title, h.heading) if x)
+        body = sanitize_text(h.text, max_len=2500)
+        src = f"\n(Source: {h.url})" if h.url else ""
+        lines.append(f"[{i}] {head}\n{body}{src}")
+    return "\n\n".join(lines)
+
+
+_DONT_GUESS = (
+    "never guess or fill gaps, and never say or imply whether the business offers, provides or "
+    "includes something, or anything about its price, dates, availability or policies, unless the "
+    "documents or the text state it — not even 'we don't provide that' or 'you'll need your own'. "
+    "Say you don't have that detail to hand and offer to "
+    "check with the team (or share the website or contact details above). Quote prices, numbers and "
+    "units exactly as written — never add or change a currency. Don't mention 'the knowledge base'."
+)
+
+
+def _format_kb_with_text(kb_context) -> str:
+    """Retrieved documents + the agent's pasted KNOWLEDGE BASE text, used hand in hand."""
+    if not kb_context.hits:
+        return (
+            "KNOWLEDGE BASE RESULTS: no document matched the customer's latest message. Answer from "
+            "the KNOWLEDGE BASE text above if it covers the question. If it doesn't, you don't know "
+            "the answer: " + _DONT_GUESS + " Small talk and general guidance are fine."
+        )
+    lines = [
+        "KNOWLEDGE BASE RESULTS — passages from this business's own documents. Use these together "
+        "with the KNOWLEDGE BASE text above: if one doesn't cover the question, check the other, "
+        "and answer from whichever has the detail. A detail in only one of them still counts — e.g. "
+        "a topic, tool or option the documents mention that a list in the text leaves out, or the "
+        "other way round; never say the business lacks something just because one of them doesn't "
+        "list it. Only when both give different values for the same thing (e.g. two prices), go "
+        "with the KNOWLEDGE BASE text (it holds the latest details, such as current offers) and say "
+        "the team can confirm. Together they are the ONLY source of facts about the business "
+        "(prices, dates, courses, products, equipment, policies, contact details). If neither covers "
+        "the question, " + _DONT_GUESS
     ]
     for i, h in enumerate(kb_context.hits, start=1):
         head = " — ".join(x for x in (h.title, h.heading) if x)
@@ -352,10 +393,10 @@ def build_system_prompt(
             parts.append(
                 "AGENT INSTRUCTIONS (advisory):\n" + sanitize_text(agent.get("prompt"), max_len=4000)
             )
-        use_legacy = kb_context is None or bool(getattr(kb_context, "error", None))
-        if use_legacy and agent.get("knowledge_base"):
+        # The pasted text is always included — with linked documents it works alongside them.
+        if agent.get("knowledge_base"):
             parts.append(
-                "KNOWLEDGE BASE:\n" + sanitize_text(agent.get("knowledge_base"), max_len=6000)
+                "KNOWLEDGE BASE:\n" + sanitize_text(agent.get("knowledge_base"), max_len=10000)  # the form's limit
             )
         for key, label in (
             ("support_email", "Support email"),
@@ -397,7 +438,7 @@ def build_system_prompt(
         parts.append(SUMMARY_LABEL + sanitize_text(conversation_summary, max_len=2000))
 
     # Knowledge goes last — closest to the conversation, where the model follows it best.
-    kb_block = format_kb_context(kb_context) if agent else ""
+    kb_block = format_kb_context(kb_context, with_text=bool(agent.get("knowledge_base"))) if agent else ""
     if kb_block:
         parts.append(kb_block)
     parts.append(format_live_lookup(live_lookup))

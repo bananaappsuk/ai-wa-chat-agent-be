@@ -598,7 +598,7 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
 
 _DEFERRAL = re.compile(
     # "I'll check / confirm / get you in touch … with the (admissions) team"
-    r"\b(check|confirm|pass|forward|refer|escalat\w*|connect|find out|get (?:you )?in touch|put you in touch|arrange)\b"
+    r"\b(check(?:ing)?|confirm|pass|forward|refer|escalat\w*|connect|find out|get (?:you )?in touch|put you in touch|arrange)\b"
     r"[^.?!]{0,60}\b(team|colleague|someone|a person|human|expert|admissions|staff)"
     # "the (admissions) team will confirm / get back to you"
     r"|\b(team|admissions|colleague|someone|staff)\b[^.?!]{0,25}\b(?:will|can|would|should|is going to)\s+"
@@ -618,11 +618,12 @@ def _asks_for_person(text: str) -> bool:
     return bool(_ASKS_FOR_PERSON.search(text or ""))
 
 
-def _needs_team_followup(kb_ctx, reply: str, live=None) -> bool:
+def _needs_team_followup(kb_ctx, reply: str, live=None, *, has_text: bool = False) -> bool:
     """True when the reply hands the question to a person — the knowledge didn't cover it, or
     the AI said it would check with / pass it to the team. When the message needed a live
-    lookup, only an explicit hand-off counts (the knowledge wasn't what was asked)."""
-    if live is None and kb_ctx is not None and getattr(kb_ctx, "searched", False) and not kb_ctx.hits:
+    lookup, only an explicit hand-off counts (the knowledge wasn't what was asked). Likewise
+    when the agent has its own pasted text: no document match doesn't mean the text lacked it."""
+    if live is None and not has_text and kb_ctx is not None and getattr(kb_ctx, "searched", False) and not kb_ctx.hits:
         return True
     return bool(_DEFERRAL.search(reply or ""))
 
@@ -1130,7 +1131,9 @@ def generate_and_send_ai_reply(
         # A reply that defers ("I'll check with the team") must reach a person — otherwise it's
         # an empty promise. Flag the conversation; any other successful reply clears the flag.
         asked_for_person = _asks_for_person(inbound_text)
-        handoff = asked_for_person or _needs_team_followup(kb_ctx, reply, live)
+        handoff = asked_for_person or _needs_team_followup(
+            kb_ctx, reply, live, has_text=bool((agent or {}).get("knowledge_base"))
+        )
         db.leads.update_one(
             {"_id": ObjectId(lead_id)},
             {
