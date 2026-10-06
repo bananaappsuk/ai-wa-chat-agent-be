@@ -159,6 +159,18 @@ class Settings(BaseSettings):
     # seconds to index new vectors, so freshly added knowledge is usable immediately.
     KB_FRESH_SCAN_SECONDS: int = 180
     KB_USER_AGENT: str = "AIChatKnowledgeBot/1.0 (+https://ai-wa-chat-agent-fe.vercel.app)"
+    # Missed-reply recovery: find customers left without a reply (AI down, credits out, server
+    # down, forgotten pause/takeover) and answer them as soon as things work again.
+    RECOVERY_ENABLED: bool = True
+    RECOVERY_SCAN_SECONDS: int = 120
+    RECOVERY_MIN_WAIT_SECONDS: int = 180  # a message is "unanswered" after this long
+    RECOVERY_REPLY_WITHIN_HOURS: float = 23.5  # inside WhatsApp's 24h window; older → a person
+    RECOVERY_MAX_ATTEMPTS: int = 3
+    AI_AUTO_HANDBACK_HOURS: float = 2.0  # paused/taken-over chat with no team reply → AI takes over (0 = never)
+    TWILIO_INBOUND_RECONCILE_ENABLED: bool = True
+    TWILIO_INBOUND_RECONCILE_MINUTES: int = 10
+    TWILIO_INBOUND_LOOKBACK_MINUTES: int = 120
+    TWILIO_INBOUND_STARTUP_LOOKBACK_HOURS: int = 24
     AI_FAILURE_FALLBACK_ENABLED: bool = True
     AI_FAILURE_FALLBACK_TEXT: str = (
         "Thanks for your message — a team member will follow up with you shortly."

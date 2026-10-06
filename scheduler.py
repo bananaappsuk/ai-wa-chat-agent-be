@@ -70,6 +70,8 @@ def run_forever() -> None:
     r = get_redis()
     interval = max(15, int(settings.SCHEDULER_INTERVAL_SECONDS))
     last_kb_refresh = 0.0
+    last_recovery_scan = 0.0
+    last_inbound_reconcile: float | None = None
     logger.info("scheduler starting owner=%s interval=%ss", _OWNER, interval)
 
     while not _STOP:
@@ -85,6 +87,29 @@ def run_forever() -> None:
 
                 enqueue(kb_tasks.refresh_due_kb_sources)
                 last_kb_refresh = time.monotonic()
+            # Missed replies: catch customers left unanswered (AI down, server down, paused chats).
+            from app.services import reply_recovery
+
+            # Each job is queued on its own: one failing must never stop the others.
+            if settings.TWILIO_INBOUND_RECONCILE_ENABLED and (
+                last_inbound_reconcile is None
+                or time.monotonic() - last_inbound_reconcile >= 60 * int(settings.TWILIO_INBOUND_RECONCILE_MINUTES)
+            ):
+                first = last_inbound_reconcile is None  # after a restart, look back further
+                try:
+                    enqueue(
+                        reply_recovery.reconcile_twilio_inbound,
+                        lookback_minutes=60 * int(settings.TWILIO_INBOUND_STARTUP_LOOKBACK_HOURS) if first else None,
+                    )
+                    last_inbound_reconcile = time.monotonic()
+                except Exception:
+                    logger.exception("could not queue Twilio inbound reconcile")
+            if settings.RECOVERY_ENABLED and time.monotonic() - last_recovery_scan >= int(settings.RECOVERY_SCAN_SECONDS):
+                try:
+                    enqueue(reply_recovery.scan_missed_replies)
+                    last_recovery_scan = time.monotonic()
+                except Exception:
+                    logger.exception("could not queue missed-reply scan")
             try:
                 from app.services.reconciliation import reconcile_stale_messages
 

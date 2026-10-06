@@ -544,6 +544,7 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
                 "twilio_sid": result.get("sid"),
                 "message_purpose": purpose,
                 "consent_status_at_send": elig.consent_status,
+                "auto_welcome": True,  # automatic first-contact message — not an answer to the customer
                 "created_at": datetime.now(timezone.utc),
             }
             res = db.messages.insert_one(msg_doc)
@@ -707,12 +708,35 @@ def _live_lookup(db, user_id: str, lead_id: str, query: str, trigger_id):
     return res
 
 
+_NOT_AN_ANSWER = {"$nin": ["failed", "undelivered", "canceled", "cancelled"]}
+
+
+def _answered_after(db, lead_id: str, after, *, catch_up_for: str | None = None) -> bool:
+    """A real reply (not a holding fallback, blast or campaign) exists after `after`.
+    With `catch_up_for`, only a catch-up reply for that trigger counts."""
+    q = {
+        "lead_id": lead_id,
+        "direction": "outbound",
+        "created_at": {"$gt": after},
+        "status": _NOT_AN_ANSWER,
+        "is_fallback": {"$ne": True},
+        "blast_id": None,
+        "campaign_id": None,
+    }
+    if catch_up_for:
+        q["catch_up_for"] = catch_up_for
+    return db.messages.find_one(q, {"_id": 1}) is not None
+
+
 def generate_and_send_ai_reply(
     user_id: str,
     lead_id: str,
     provider: str | None = None,
     trigger_message_id: str | None = None,
+    catch_up_minutes: int | None = None,
 ) -> None:
+    """`catch_up_minutes` is set by missed-reply recovery: the customer waited that long
+    because of a delay on our side (AI down, server down, paused contact)."""
     db = _db()
     lead = db.leads.find_one({"_id": ObjectId(lead_id), "user_id": user_id})
     if not lead:
@@ -795,7 +819,9 @@ def generate_and_send_ai_reply(
     # Count this lead as an AI conversation for the month (SADD-deduped; idempotent on retry).
     record_ai_conversation(_redis(), user_id, lead_id)
 
-    if trigger_id:
+    if catch_up_minutes:
+        idem = make_idempotency_key("ai-catch-up", user_id, lead_id, trigger_id or str(lead.get("last_inbound_at") or ""))
+    elif trigger_id:
         idem = make_idempotency_key("ai", user_id, lead_id, trigger_id)
     else:
         idem = make_idempotency_key("ai", user_id, lead_id, str(lead.get("last_inbound_at") or ""))
@@ -807,6 +833,14 @@ def generate_and_send_ai_reply(
         except Exception:
             pass
         return
+
+    # Never answer the same message twice: a catch-up skips if anything answered it meanwhile,
+    # and a late original job skips if a catch-up already did.
+    if trigger_doc is not None and trigger_doc.get("created_at"):
+        if catch_up_minutes and _answered_after(db, lead_id, trigger_doc["created_at"]):
+            return
+        if not catch_up_minutes and _answered_after(db, lead_id, trigger_doc["created_at"], catch_up_for=trigger_id):
+            return
 
     last_in = trigger_doc
     if last_in is None:
@@ -898,6 +932,7 @@ def generate_and_send_ai_reply(
     live = _live_lookup(db, user_id, lead_id, route.lookup_query, trigger_id)
 
     fallback_sent_key = f"ai:fallback_sent:{user_id}:{lead_id}"
+    is_fallback = False
     try:
         reply = openai_service.generate_reply(
             agent,
@@ -913,6 +948,7 @@ def generate_and_send_ai_reply(
             kb_context=kb_ctx,
             live_lookup=live,
             first_message=ctx.get("first_customer_message"),
+            delayed_minutes=catch_up_minutes,
         )
     except Exception as exc:
         logger.exception(
@@ -943,6 +979,7 @@ def generate_and_send_ai_reply(
             r = Redis.from_url(settings.REDIS_URL, decode_responses=True)
             if r.set(fallback_sent_key, "1", nx=True, ex=86400):
                 reply = (settings.AI_FAILURE_FALLBACK_TEXT or "").strip()
+                is_fallback = True
             else:
                 return
         else:
@@ -965,6 +1002,7 @@ def generate_and_send_ai_reply(
         r = Redis.from_url(settings.REDIS_URL, decode_responses=True)
         if r.set(fallback_sent_key, "1", nx=True, ex=86400):
             reply = (settings.AI_FAILURE_FALLBACK_TEXT or "").strip()
+            is_fallback = True
             if not reply:
                 return
         else:
@@ -1018,6 +1056,8 @@ def generate_and_send_ai_reply(
         "agent_name": agent_name,
         "consent_status_at_send": elig.consent_status,
         "trigger_message_id": trigger_id,
+        "is_fallback": is_fallback,  # a holding message, not an answer — recovery will still reply
+        "catch_up_for": trigger_id if catch_up_minutes else None,
         "created_at": datetime.now(timezone.utc),
     }
     res = db.messages.insert_one(msg_doc)
@@ -1119,6 +1159,13 @@ def generate_and_send_ai_reply(
                 resource_id=lead_id,
                 dedupe_key=f"ai_deferred:{lead_id}:{datetime.now(timezone.utc).strftime('%Y%m%d%H')}",
             )
+        if not is_fallback:
+            # Answered for real: no longer waiting, and the next outage may send one holding message again.
+            db.leads.update_one({"_id": ObjectId(lead_id)}, {"$unset": {"missed_reply": ""}})
+            try:
+                _redis().delete(fallback_sent_key)
+            except Exception:
+                pass
         msg = db.messages.find_one({"_id": res.inserted_id})
         if msg:
             _publish(user_id, "message:updated", _serialize(msg))

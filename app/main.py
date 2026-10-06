@@ -104,8 +104,12 @@ async def _scheduled_campaigns_loop() -> None:
     from app.workers.queue import enqueue
     from app.workers import campaign_tasks, kb_tasks
 
+    from app.services import reply_recovery
+
     loop = asyncio.get_running_loop()
     last_kb_refresh = 0.0
+    last_recovery_scan = 0.0
+    last_inbound_reconcile: float | None = None
     while True:
         try:
             await asyncio.sleep(max(15, int(settings.SCHEDULER_INTERVAL_SECONDS)))
@@ -113,6 +117,27 @@ async def _scheduled_campaigns_loop() -> None:
             if loop.time() - last_kb_refresh >= 600:  # knowledge-base auto-refresh check
                 enqueue(kb_tasks.refresh_due_kb_sources)
                 last_kb_refresh = loop.time()
+            # Missed replies: catch customers left unanswered (AI down, server down, paused chats).
+            # Each job is queued on its own: one failing must never stop the others.
+            if settings.TWILIO_INBOUND_RECONCILE_ENABLED and (
+                last_inbound_reconcile is None
+                or loop.time() - last_inbound_reconcile >= 60 * int(settings.TWILIO_INBOUND_RECONCILE_MINUTES)
+            ):
+                first = last_inbound_reconcile is None  # after a restart, look back further
+                try:
+                    enqueue(
+                        reply_recovery.reconcile_twilio_inbound,
+                        lookback_minutes=60 * int(settings.TWILIO_INBOUND_STARTUP_LOOKBACK_HOURS) if first else None,
+                    )
+                    last_inbound_reconcile = loop.time()
+                except Exception:
+                    logger.exception("could not queue Twilio inbound reconcile")
+            if settings.RECOVERY_ENABLED and loop.time() - last_recovery_scan >= int(settings.RECOVERY_SCAN_SECONDS):
+                try:
+                    enqueue(reply_recovery.scan_missed_replies)
+                    last_recovery_scan = loop.time()
+                except Exception:
+                    logger.exception("could not queue missed-reply scan")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
