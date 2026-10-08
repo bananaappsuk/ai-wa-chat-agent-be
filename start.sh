@@ -19,23 +19,36 @@ if [ "${WORKER_IN_API:-true}" != "true" ]; then
     --proxy-headers --forwarded-allow-ips='*'
 fi
 
-# --- Combined mode: worker (background) + API, supervise both ----------------
-# If EITHER exits, take the other down and exit non-zero so Render restarts the
-# whole container — a dead worker must never linger silently.
-python worker.py &
-WORKER_PID=$!
+# --- Combined mode: workers (background) + API, supervise all ----------------
+# WORKER_PROCESSES workers drain the queues in parallel — an AI reply mostly waits on
+# OpenAI, so one worker manages only ~6 replies a minute. If ANY process exits, take
+# the rest down and exit non-zero so Render restarts the whole container — a dead
+# worker must never linger silently.
+WORKER_PROCESSES="${WORKER_PROCESSES:-3}"
+PIDS=""
+i=0
+while [ "$i" -lt "$WORKER_PROCESSES" ]; do
+  python worker.py &
+  PIDS="$PIDS $!"
+  i=$((i + 1))
+done
 
 uvicorn app.main:app \
   --host 0.0.0.0 --port "$PORT" --workers "$WORKERS" \
   --timeout-keep-alive "$KEEPALIVE" --timeout-graceful-shutdown "$GRACEFUL" \
   --proxy-headers --forwarded-allow-ips='*' &
-API_PID=$!
+PIDS="$PIDS $!"
 
-trap 'kill "$WORKER_PID" "$API_PID" 2>/dev/null; exit 0' INT TERM
+trap 'kill $PIDS 2>/dev/null; exit 0' INT TERM
 
-while kill -0 "$WORKER_PID" 2>/dev/null && kill -0 "$API_PID" 2>/dev/null; do
+all_alive() {
+  for pid in $PIDS; do
+    kill -0 "$pid" 2>/dev/null || return 1
+  done
+}
+while all_alive; do
   sleep 5
 done
 
-kill "$WORKER_PID" "$API_PID" 2>/dev/null
+kill $PIDS 2>/dev/null
 exit 1

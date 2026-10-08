@@ -107,12 +107,13 @@ class Settings(BaseSettings):
     AI_DEFAULT_TIMEZONE: str = "Europe/London"
     # Model that decides who answers each message (tiny call: conversation + agent list → JSON).
     AI_ROUTER_MODEL: str = "gpt-4o-mini"
-    # Each conversational message uses routing + knowledge lookup + reply (a few thousand tokens),
-    # so 200k/day stopped AI replies after ~60–80 messages. The monthly cost cap below is the
-    # real spend guard.
-    AI_DAILY_TOKEN_LIMIT_PER_TENANT: int = 2_000_000
-    AI_MONTHLY_COST_LIMIT_PER_TENANT: float = 50.0
-    AI_MAX_REQUESTS_PER_MINUTE_PER_TENANT: int = 30
+    # Each conversational message uses routing + knowledge lookup + reply (~8k tokens with a
+    # linked PDF + pasted text), so 2M/day stopped AI replies after ~250 messages. Sized for
+    # blasts of thousands of contacts all replying (~25k replies/day, a reply burst of 300/min).
+    # The monthly cost cap is the real spend guard (~$0.0013 per reply).
+    AI_DAILY_TOKEN_LIMIT_PER_TENANT: int = 200_000_000
+    AI_MONTHLY_COST_LIMIT_PER_TENANT: float = 300.0
+    AI_MAX_REQUESTS_PER_MINUTE_PER_TENANT: int = 300
     AI_SUMMARY_TRIGGER_MESSAGE_COUNT: int = 8
     AI_SUMMARY_MAX_OUTPUT_TOKENS: int = 250
     AI_SUMMARY_REFRESH_INTERVAL_MESSAGES: int = 6
