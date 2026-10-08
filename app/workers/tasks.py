@@ -1309,14 +1309,61 @@ def blast_chat_text(*, content_sid: Optional[str], content_variables: Optional[d
     return (body or "").strip() or ("[media]" if media_url else "")
 
 
+def _find_or_create_blast_lead(db, user_id: str, phone: str) -> Optional[dict]:
+    """A blasted number that isn't a contact yet becomes one (same shape as an inbound-created
+    lead), so the blast is in its chat when they reply."""
+    from pymongo.errors import DuplicateKeyError
+
+    from app.services.whatsapp_consent import CONSENT_DEFAULTS
+
+    p = normalize_e164(phone)
+    if not p:
+        return None
+    existing = db.leads.find_one({"user_id": user_id, "phone": p})
+    if existing:
+        return existing
+    now = datetime.now(timezone.utc)
+    doc = {
+        "user_id": user_id,
+        "name": p,
+        "phone": p,
+        "score": "cold",
+        "lead_score": 0,
+        "score_updated_at": now,
+        "source": "blast",
+        "tags": [],
+        "blacklisted": False,
+        "ai_paused": False,
+        "needs_human": False,
+        "takeover_by": None,
+        "takeover_at": None,
+        "last_inbound_at": None,
+        "whatsapp_window_expires_at": None,
+        **CONSENT_DEFAULTS,
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        doc["_id"] = db.leads.insert_one(doc).inserted_id
+    except DuplicateKeyError:
+        return db.leads.find_one({"user_id": user_id, "phone": p})
+    _publish(user_id, "lead:updated", _serialize(doc))
+    return doc
+
+
 def record_blast_in_chat(db, *, user_id: str, lead: Optional[dict], blast: dict, text: str, provider: str,
                          provider_message_id: Optional[str], status: str, purpose: str,
-                         content_sid: Optional[str], content_variables: Optional[dict]) -> None:
+                         content_sid: Optional[str], content_variables: Optional[dict],
+                         phone: Optional[str] = None) -> None:
     """Blasts go into the contact's conversation like any other outbound message, so Live Chat
-    shows them and the AI knows what a reply is answering. Never breaks the send."""
-    if not lead or not text:
+    shows them and the AI knows what a reply is answering. A number that isn't a contact yet is
+    added as one. Never breaks the send."""
+    if not text:
         return
     try:
+        lead = lead or (_find_or_create_blast_lead(db, user_id, phone) if phone else None)
+        if not lead:
+            return
         now = datetime.now(timezone.utc)
         doc = {
             "user_id": user_id,
@@ -1454,6 +1501,7 @@ def _process_blast_recipient(
                                          template_name=tmpl.get("name") or tmpl.get("meta_template_name")),
                     provider="meta", provider_message_id=result.get("provider_message_id"), status="sent",
                     purpose=purpose, content_sid=None, content_variables=content_variables,
+                    phone=norm_phone,
                 )
                 db.blast_recipients.update_one(
                     {"_id": recipient["_id"]},
@@ -1504,6 +1552,7 @@ def _process_blast_recipient(
                                          media_url=media_url),
                     provider="twilio", provider_message_id=result.get("sid"), status=app_status,
                     purpose=purpose, content_sid=content_sid, content_variables=content_variables,
+                    phone=norm_phone,
                 )
                 db.blast_recipients.update_one(
                     {"_id": recipient["_id"]},

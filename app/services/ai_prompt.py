@@ -179,7 +179,8 @@ def _format_kb_with_text(kb_context) -> str:
 
 def _first_name(lead_profile: Optional[dict]) -> str:
     name = sanitize_text((lead_profile or {}).get("name"), max_len=60)
-    return name.split()[0] if name else ""
+    first = name.split()[0] if name else ""
+    return "" if first.lstrip("+").isdigit() else first  # a contact named by their number has no name
 
 
 SAFETY_BLOCK = """\

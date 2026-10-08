@@ -26,7 +26,8 @@ def _blast(db, *, phone="+447453289655", with_lead=True, variables=None, body=BO
     from app.workers import tasks
 
     now = datetime.now(timezone.utc)
-    db.users.insert_one({"_id": ObjectId(UID), "email": "t@example.com", "plan": "business", "subscription_status": "active"})
+    if not db.users.find_one({"_id": ObjectId(UID)}):
+        db.users.insert_one({"_id": ObjectId(UID), "email": "t@example.com", "plan": "business", "subscription_status": "active"})
     if with_lead:
         db.leads.insert_one({"user_id": UID, "phone": phone, "name": "Sriram Angajala", "whatsapp_consent_status": "opted_in",
                              "last_inbound_at": now, "blacklisted": False})
@@ -53,16 +54,57 @@ def test_blast_is_saved_in_the_contacts_chat_with_the_real_text():
     assert msg["message"].startswith("Hi Sriram! 👋 Welcome to AI Testing Hub.") and "Fees and enrolment" in msg["message"]
 
 
-def test_numbers_that_are_not_contacts_are_sent_but_not_saved():
+def test_a_number_that_is_not_a_contact_becomes_one_with_the_blast_in_its_chat():
     db = mongomock.MongoClient().db
-    _, rec = _blast(db, with_lead=False)
-    assert rec["status"] == "sent" and db.messages.count_documents({}) == 0
+    blast, rec = _blast(db, with_lead=False, variables={"1": "All"})
+    lead = db.leads.find_one({"phone": "+447453289655"})
+    assert rec["status"] == "sent" and lead is not None
+    assert lead["user_id"] == UID and lead["source"] == "blast" and lead["name"] == "+447453289655"
+    assert lead["whatsapp_consent_status"] == "unknown" and lead["ai_paused"] is False  # never auto opted-in
+    msg = db.messages.find_one({"lead_id": str(lead["_id"])})
+    assert msg["blast_id"] == str(blast["_id"]) and msg["message"].startswith("Hi All! 👋 Welcome to AI Testing Hub.")
+
+
+def test_blasting_the_same_new_number_twice_keeps_one_contact():
+    db = mongomock.MongoClient().db
+    _blast(db, with_lead=False, variables={"1": "All"})
+    _blast(db, with_lead=False, variables={"1": "All"})
+    assert db.leads.count_documents({"phone": "+447453289655"}) == 1
+    lead = db.leads.find_one({"phone": "+447453289655"})
+    assert db.messages.count_documents({"lead_id": str(lead["_id"])}) == 2
 
 
 def test_a_failed_send_saves_nothing():
     db = mongomock.MongoClient().db
     _, rec = _blast(db, variables={"1": ""}, body="Your appointment is on {{1}}.")
     assert rec["status"] == "failed" and db.messages.count_documents({}) == 0
+
+
+def test_a_failed_send_to_a_new_number_creates_no_contact():
+    db = mongomock.MongoClient().db
+    _, rec = _blast(db, with_lead=False, variables={"1": ""}, body="Your appointment is on {{1}}.")
+    assert rec["status"] == "failed" and db.leads.count_documents({}) == 0 and db.messages.count_documents({}) == 0
+
+
+@pytest.mark.asyncio
+async def test_first_reply_names_a_blast_contact_from_their_whatsapp_profile():
+    from app.services import inbound_whatsapp
+    from app.services.inbound_whatsapp import InboundMessage, process_inbound_message
+
+    db = AsyncMongoMockClient().db
+    await db.users.insert_one({"_id": ObjectId(UID), "email": "t@example.com", "twilio_whatsapp_to": "+447828730643"})
+    await db.leads.insert_one({"user_id": UID, "phone": "+447453289655", "name": "+447453289655", "source": "blast",
+                               "whatsapp_consent_status": "unknown", "blacklisted": False})
+    await db.leads.insert_one({"user_id": UID, "phone": "+447700900999", "name": "Priya", "blacklisted": False})
+    with patch("app.services.lead_service.get_db", return_value=db), \
+         patch.object(inbound_whatsapp.ws_manager, "push", new=AsyncMock()):
+        for phone, sid in (("+447453289655", "SMr1"), ("+447700900999", "SMr2")):
+            await process_inbound_message(InboundMessage(
+                provider="twilio", provider_message_id=sid, customer_phone=phone, business_identifier="+447828730643",
+                body="yes I'll come", profile_name="Sriram A", timestamp=None, message_type="text",
+                skip_provider_outbound=True, skip_ai_jobs=True), db=db)
+    assert (await db.leads.find_one({"phone": "+447453289655"}))["name"] == "Sriram A"
+    assert (await db.leads.find_one({"phone": "+447700900999"}))["name"] == "Priya"  # a real name is never overwritten
 
 
 @pytest.mark.asyncio
@@ -101,3 +143,11 @@ def test_a_late_reply_keeps_the_blast_in_context_and_it_is_labelled():
     assert ctx["messages"][0]["content"].startswith("Hi! Welcome to AI Testing Hub")
     turns = conversation_turns(db, UID, "l1")
     assert turns[0]["who"] == "Broadcast message from the business"
+
+
+def test_a_contact_named_by_their_number_is_not_greeted_by_it():
+    from app.services.ai_prompt import _first_name
+
+    assert _first_name({"name": "+447453289655"}) == ""
+    assert _first_name({"name": "447453289655"}) == ""
+    assert _first_name({"name": "Sriram Angajala"}) == "Sriram"

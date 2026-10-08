@@ -331,6 +331,10 @@ async def process_inbound_message(
     lead = await lead_service.find_or_create_by_phone(
         user_id, customer_phone, name=inbound.profile_name, source="whatsapp"
     )
+    if inbound.profile_name and (lead.get("name") or "") in ("", customer_phone):
+        # Contacts added by a blast are named by their number until they first write in.
+        await db.leads.update_one({"_id": lead["_id"]}, {"$set": {"name": inbound.profile_name, "updated_at": utcnow()}})
+        lead["name"] = inbound.profile_name
     lead_id = str(lead["_id"])
 
     display_body = _placeholder_body(
