@@ -19,7 +19,7 @@ class SocialLinks(BaseModel):
 class AgentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     kind: Kind = "inbound"
-    prompt: Optional[str] = Field(default=None, max_length=4000)
+    prompt: Optional[str] = Field(default=None, max_length=10000)
     tone: Tone = "neutral"
     knowledge_base: Optional[str] = Field(default=None, max_length=10000)
     status: Status = "active"

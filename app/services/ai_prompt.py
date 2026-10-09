@@ -392,7 +392,7 @@ def build_system_prompt(
     if agent:
         if agent.get("prompt"):
             parts.append(
-                "AGENT INSTRUCTIONS (advisory):\n" + sanitize_text(agent.get("prompt"), max_len=4000)
+                "AGENT INSTRUCTIONS (advisory):\n" + sanitize_text(agent.get("prompt"), max_len=10000)  # the form's limit
             )
         # The pasted text is always included — with linked documents it works alongside them.
         if agent.get("knowledge_base"):

@@ -216,3 +216,14 @@ def test_full_pasted_text_reaches_the_prompt_up_to_the_form_limit():
     p = build_system_prompt(agent={**AGENT, "knowledge_base": text}, ai_settings={},
                             kb_context=KBContext(kb_ids=["k"], query="q", searched=True, hits=[_hit("y")]))
     assert "LAST LINE: weekend batch 10am" in p  # a detail at the very end of the text is still there
+
+
+def test_full_instructions_reach_the_prompt_up_to_the_form_limit():
+    from app.models.agent import AgentCreate
+
+    limit = AgentCreate.model_fields["prompt"].metadata[0].max_length
+    assert limit == 10000
+    prompt = "y" * (limit - 40) + " RULE 12: share the registration link"
+    p = build_system_prompt(agent={**AGENT, "prompt": prompt}, ai_settings={}, kb_context=None)
+    assert "RULE 12: share the registration link" in p  # the end of long instructions is not cut off
+    AgentCreate(name="A", prompt="z" * 4117)  # an agent saved with >4000 chars of instructions saves again
