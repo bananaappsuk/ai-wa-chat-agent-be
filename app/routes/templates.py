@@ -159,6 +159,36 @@ async def sync_meta_templates(user: dict = Depends(current_user)) -> dict:
     return result
 
 
+def _meta_preview_text(components: list) -> str:
+    """Header, body and footer text of a Meta template, as the recipient sees it."""
+    parts = []
+    for kind in ("HEADER", "BODY", "FOOTER"):
+        for c in components or []:
+            if isinstance(c, dict) and str(c.get("type") or "").upper() == kind and (c.get("text") or "").strip():
+                parts.append(c["text"].strip())
+    return "\n\n".join(parts)
+
+
+@router.get("/{template_id}/preview")
+async def preview_template(template_id: str, user: dict = Depends(current_user)) -> dict:
+    """The template's message text, so users can see what they're sending before they pick it."""
+    from starlette.concurrency import run_in_threadpool
+
+    from app.services.ai_campaign import template_body
+
+    require_object_id(template_id)
+    doc = await get_db().templates.find_one(
+        {"_id": ObjectId(template_id), "user_id": str(user["_id"])}
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if (doc.get("provider") or "twilio_content") == "meta":
+        body = _meta_preview_text(doc.get("components") or [])
+    else:
+        body = await run_in_threadpool(template_body, doc.get("content_sid") or "") if doc.get("content_sid") else ""
+    return {"id": template_id, "name": doc.get("name"), "body": body}
+
+
 @router.get("/{template_id}")
 async def get_template(template_id: str, user: dict = Depends(current_user)) -> dict:
     require_object_id(template_id)
