@@ -1,6 +1,7 @@
 """Resolve campaign/blast provider from the selected template (never env/inbound)."""
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from bson import ObjectId
@@ -46,6 +47,27 @@ def classify_bulk_send_error(exc: BaseException, *, provider: str) -> str:
         # Consent/eligibility RuntimeErrors stay on the Meta path — never Twilio fallback.
         return classify_send_error(exc)
     return classify_send_error(exc)
+
+
+_ACCOUNT_BLOCKED = re.compile(
+    r"not active|suspend|insufficient (?:funds|balance)|account (?:is )?(?:closed|disabled|locked)"
+    r"|access token|eligibility payment|payment method",
+    re.I,
+)
+
+
+def account_blocked_reason(exc: BaseException, *, category: str, provider: str) -> Optional[str]:
+    """When the provider rejects the whole account (inactive, out of balance, bad credentials),
+    every recipient would fail the same way — the send should pause, not fail them one by one.
+    Returns the reason to show the user, or None for a per-recipient failure."""
+    if not (category == "authentication_error" or getattr(exc, "status_code", None) == 401
+            or _ACCOUNT_BLOCKED.search(str(exc))):
+        return None
+    if (provider or "").strip().lower() == "meta":
+        return ("WhatsApp (Meta) rejected the account — check the WhatsApp Business account and its "
+                "payment method, then press Resume.")
+    return ("Twilio rejected the account (usually a zero balance or a suspended account) — top up or "
+            "fix it in Twilio, then press Resume.")
 
 
 async def peek_template(user_id: str, template_id: str) -> dict:

@@ -1235,6 +1235,31 @@ def _cancel_open_blast_recipients(db, blast_id: str) -> None:
     )
 
 
+def _pause_blast_for_account(db, user_id: str, blast_id: str, reason: str) -> None:
+    """The provider rejected the whole account: pause instead of failing every remaining
+    recipient. They stay pending, and Resume (once the account is fixed) sends to them."""
+    now = datetime.now(timezone.utc)
+    paused = db.blast_campaigns.find_one_and_update(
+        {"_id": ObjectId(blast_id), "status": "sending"},
+        {"$set": {"status": "paused", "pause_reason": reason, "paused_at": now, "updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not paused:
+        return
+    _recount_blast(db, user_id, blast_id)
+    try:
+        from app.services.notifications import create_notification_sync
+
+        create_notification_sync(
+            db, user_id=user_id, type="message_failed", title="Blast paused — WhatsApp account problem",
+            message=f"'{paused.get('name') or 'Blast'}' paused: {reason}", resource_type="blast",
+            resource_id=blast_id, dedupe_key=f"blast_paused:{blast_id}:{now:%Y%m%d%H}",
+        )
+    except Exception:
+        logger.warning("blast pause notification failed blast_id=%s", blast_id, exc_info=True)
+    _publish(user_id, "blast:updated", _serialize(paused))
+
+
 def _recount_blast(db, user_id: str, blast_id: str) -> Optional[dict]:
     pipe = [
         {"$match": {"blast_id": blast_id}},
@@ -1584,6 +1609,18 @@ def _process_blast_recipient(
             inc_provider_failure(category)
         except Exception:
             pass
+        from app.services.campaign_provider import account_blocked_reason
+
+        blocked = account_blocked_reason(exc, category=category, provider=camp_prov)
+        if blocked:
+            # Not this number's fault: keep it for Resume and pause the whole blast.
+            db.blast_recipients.update_one(
+                {"_id": recipient["_id"]},
+                {"$set": {"status": "pending", "error": None, "updated_at": datetime.now(timezone.utc)},
+                 "$inc": {"attempt_count": -1}},
+            )
+            _pause_blast_for_account(db, user_id, str(recipient["blast_id"]), blocked)
+            return
         attempts = int(updated.get("attempt_count") or 1)
         if is_retryable_category(category) and attempts <= max_retries():
             delay = compute_retry_delay_seconds(attempts)

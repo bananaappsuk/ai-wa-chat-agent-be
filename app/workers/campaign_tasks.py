@@ -284,6 +284,30 @@ def process_campaign_batch(user_id: str, campaign_id: str) -> None:
         q.enqueue_in(timedelta(seconds=2), finalize_campaign_if_idle, user_id, campaign_id)
 
 
+def _pause_campaign_for_account(db, user_id: str, campaign_id: str, reason: str) -> None:
+    """The provider rejected the whole account: pause instead of failing every remaining
+    contact. They stay queued, and Resume (once the account is fixed) sends to them."""
+    now = _utcnow()
+    paused = db.campaigns.find_one_and_update(
+        {"_id": ObjectId(campaign_id), "status": "running"},
+        {"$set": {"status": "paused", "pause_reason": reason, "paused_at": now, "updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not paused:
+        return
+    try:
+        from app.services.notifications import create_notification_sync
+
+        create_notification_sync(
+            db, user_id=user_id, type="campaign_failed", title="Campaign paused — WhatsApp account problem",
+            message=f"'{paused.get('name') or 'Campaign'}' paused: {reason}", resource_type="campaign",
+            resource_id=campaign_id, dedupe_key=f"campaign_paused:{campaign_id}:{now:%Y%m%d%H}",
+        )
+    except Exception:
+        pass
+    _publish(user_id, "campaign:updated", _serialize(paused))
+
+
 def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -> None:
     db = _db()
     if not ObjectId.is_valid(recipient_id):
@@ -820,6 +844,18 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
             inc_provider_failure(category)
         except Exception:
             pass
+        from app.services.campaign_provider import account_blocked_reason
+
+        blocked = account_blocked_reason(exc, category=category, provider=stored_provider(campaign))
+        if blocked and campaign and campaign.get("status") == "running":
+            # Not this contact's fault: keep them queued for Resume and pause the whole campaign.
+            db.campaign_recipients.update_one(
+                {"_id": recipient["_id"]},
+                {"$set": {"status": "queued", "error_message": None, "error_code": None, "updated_at": _utcnow()},
+                 "$inc": {"attempt_count": -1}},
+            )
+            _pause_campaign_for_account(db, user_id, campaign_id, blocked)
+            return
         if campaign and campaign.get("status") == "cancelled":
             db.campaign_recipients.update_one(
                 {"_id": recipient["_id"]},

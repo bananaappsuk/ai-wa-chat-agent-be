@@ -1493,7 +1493,7 @@ async def resume_campaign(cid: str, user: dict = Depends(current_user)) -> dict:
         raise HTTPException(status_code=400, detail="Only paused campaigns can resume")
     await get_db().campaigns.update_one(
         {"_id": ObjectId(cid)},
-        {"$set": {"status": "running", "paused_at": None, "updated_at": utcnow()}},
+        {"$set": {"status": "running", "paused_at": None, "pause_reason": None, "updated_at": utcnow()}},
     )
     # Requeue processing stuck? leave processing; queued stay queued
     await get_db().campaign_recipients.update_many(
@@ -1863,13 +1863,58 @@ async def resume_blast(bid: str, user: dict = Depends(current_user)) -> dict:
         raise HTTPException(status_code=404, detail="Not found")
     if doc.get("status") != "paused":
         raise HTTPException(status_code=400, detail="Only paused blasts can resume")
+    await _requeue_stuck_blast_recipients(bid)
     await get_db().blast_campaigns.update_one(
-        {"_id": ObjectId(bid)}, {"$set": {"status": "sending", "updated_at": utcnow()}}
+        {"_id": ObjectId(bid)},
+        {"$set": {"status": "sending", "pause_reason": None, "paused_at": None, "updated_at": utcnow()}},
     )
     enqueue(tasks.send_blast_messages, user_id, bid, queue="bulk")
     fresh = await get_db().blast_campaigns.find_one({"_id": ObjectId(bid)})
     await ws_manager.push(user_id, "blast:updated", serialize(fresh))
     return serialize(fresh)
+
+
+async def _requeue_stuck_blast_recipients(bid: str) -> None:
+    """A recipient left 'processing' by a restarted worker would block the blast forever."""
+    from datetime import timedelta
+
+    await get_db().blast_recipients.update_many(
+        {"blast_id": bid, "status": "processing", "updated_at": {"$lt": utcnow() - timedelta(minutes=5)}},
+        {"$set": {"status": "pending", "updated_at": utcnow()}},
+    )
+
+
+@router.post("/blasts/{bid}/retry-failed")
+async def retry_failed_blast(bid: str, user: dict = Depends(current_user)) -> dict:
+    """Send again to the recipients that failed (e.g. after the WhatsApp account was fixed).
+    Those who already received it are never sent to twice."""
+    user_id = str(user["_id"])
+    if not ObjectId.is_valid(bid):
+        raise HTTPException(status_code=404, detail="Not found")
+    doc = await get_db().blast_campaigns.find_one({"_id": ObjectId(bid), "user_id": user_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if doc.get("status") == "cancelled":
+        raise HTTPException(status_code=400, detail="Cannot retry a cancelled blast")
+    now = utcnow()
+    res = await get_db().blast_recipients.update_many(
+        {"blast_id": bid, "status": "failed"},
+        {"$set": {"status": "pending", "error": None, "attempt_count": 0, "next_retry_at": None, "updated_at": now}},
+    )
+    await _requeue_stuck_blast_recipients(bid)
+    open_n = await get_db().blast_recipients.count_documents(
+        {"blast_id": bid, "status": {"$in": ["pending", "retrying"]}}
+    )
+    if res.modified_count == 0 and not (doc.get("status") == "paused" and open_n):
+        raise HTTPException(status_code=400, detail="No failed recipients to retry")
+    await get_db().blast_campaigns.update_one(
+        {"_id": ObjectId(bid)},
+        {"$set": {"status": "sending", "pause_reason": None, "paused_at": None, "completed_at": None, "updated_at": now}},
+    )
+    enqueue(tasks.send_blast_messages, user_id, bid, queue="bulk")
+    fresh = await get_db().blast_campaigns.find_one({"_id": ObjectId(bid)})
+    await ws_manager.push(user_id, "blast:updated", serialize(fresh))
+    return {**serialize(fresh), "retried": res.modified_count}
 
 
 @router.post("/blasts/{bid}/cancel")
