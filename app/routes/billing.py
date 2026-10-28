@@ -112,6 +112,7 @@ async def get_subscription(user: dict = Depends(current_user)) -> dict[str, Any]
         "price_display": catalog.get("price_display"),
         "billing_cycle": "Monthly",
         "subscription_status": status,
+        "manual_plan": is_manual_plan(user),
         "stripe_mode": rt.mode,
         "stripe_customer_id": user.get("stripe_customer_id"),
         "stripe_subscription_id": user.get("stripe_subscription_id"),
@@ -392,6 +393,22 @@ async def _resolve_user_id(
     return None
 
 
+def is_manual_plan(user: Optional[dict]) -> bool:
+    """A plan an admin assigned by hand (Admin → plan with manual override) or Enterprise
+    (never Stripe-backed). Stripe events must not change it."""
+    status = ((user or {}).get("subscription_status") or "").strip().lower()
+    return status == "manual_override" or normalize_plan_key((user or {}).get("plan")) == "enterprise"
+
+
+def _keep_manual_plan(user: Optional[dict], fields: dict[str, Any]) -> dict[str, Any]:
+    """Stripe events still record their billing details, but never switch a hand-assigned plan
+    (a test subscription renewing once dropped the admin from Enterprise to Starter). Clear the
+    override in Admin to hand the plan back to Stripe."""
+    if is_manual_plan(user):
+        return {k: v for k, v in fields.items() if k not in ("plan", "subscription_status")}
+    return fields
+
+
 def _subscription_fields(subscription: dict, *, deleted: bool = False) -> dict[str, Any]:
     now = utcnow()
     if deleted:
@@ -473,13 +490,16 @@ async def _apply_subscription(db, subscription: dict, *, deleted: bool = False) 
 
     fields = _subscription_fields(subscription, deleted=deleted)
     # Preserve subscription_created_at if already set
-    existing = await db.users.find_one({"_id": ObjectId(user_id)}, {"subscription_created_at": 1})
+    existing = await db.users.find_one(
+        {"_id": ObjectId(user_id)}, {"subscription_created_at": 1, "plan": 1, "subscription_status": 1}
+    )
     if existing and existing.get("subscription_created_at") and "subscription_created_at" in fields:
         del fields["subscription_created_at"]
     elif not existing or not existing.get("subscription_created_at"):
         if not deleted and subscription.get("created"):
             fields["subscription_created_at"] = _dt_from_ts(subscription.get("created"))
 
+    fields = _keep_manual_plan(existing, fields)
     await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": fields})
 
 
@@ -540,6 +560,8 @@ async def _handle_checkout_completed(db, session: dict) -> None:
             "trialing" if int(settings.STRIPE_TRIAL_DAYS or 0) > 0 else "active"
         )
 
+    current = await db.users.find_one({"_id": ObjectId(user_id)}, {"plan": 1, "subscription_status": 1})
+    fields = _keep_manual_plan(current, fields)
     await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": fields})
 
 
@@ -579,6 +601,8 @@ async def _handle_invoice(db, invoice: dict, *, payment_status: str) -> None:
         fields["last_payment_status"] = "action_required"
     # finalized → only latest_invoice_id
 
+    current = await db.users.find_one({"_id": ObjectId(user_id)}, {"plan": 1, "subscription_status": 1})
+    fields = _keep_manual_plan(current, fields)
     await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": fields})
 
 
