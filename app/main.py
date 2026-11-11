@@ -109,6 +109,7 @@ async def _scheduled_campaigns_loop() -> None:
     loop = asyncio.get_running_loop()
     last_kb_refresh = 0.0
     last_recovery_scan = 0.0
+    last_rescore = 0.0
     last_inbound_reconcile: float | None = None
     while True:
         try:
@@ -117,6 +118,14 @@ async def _scheduled_campaigns_loop() -> None:
             if loop.time() - last_kb_refresh >= 600:  # knowledge-base auto-refresh check
                 enqueue(kb_tasks.refresh_due_kb_sources)
                 last_kb_refresh = loop.time()
+            if loop.time() - last_rescore >= 3600:
+                from app.services import lead_scoring
+
+                try:
+                    enqueue(lead_scoring.rescore_stale_leads, queue="bulk")
+                    last_rescore = loop.time()
+                except Exception:
+                    logger.exception("could not queue lead re-score")
             # Missed replies: catch customers left unanswered (AI down, server down, paused chats).
             # Each job is queued on its own: one failing must never stop the others.
             if settings.TWILIO_INBOUND_RECONCILE_ENABLED and (

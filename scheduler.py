@@ -71,6 +71,7 @@ def run_forever() -> None:
     interval = max(15, int(settings.SCHEDULER_INTERVAL_SECONDS))
     last_kb_refresh = 0.0
     last_recovery_scan = 0.0
+    last_rescore = 0.0
     last_inbound_reconcile: float | None = None
     logger.info("scheduler starting owner=%s interval=%ss", _OWNER, interval)
 
@@ -87,6 +88,14 @@ def run_forever() -> None:
 
                 enqueue(kb_tasks.refresh_due_kb_sources)
                 last_kb_refresh = time.monotonic()
+            if time.monotonic() - last_rescore >= 3600:
+                from app.services import lead_scoring
+
+                try:
+                    enqueue(lead_scoring.rescore_stale_leads, queue="bulk")
+                    last_rescore = time.monotonic()
+                except Exception:
+                    logger.exception("could not queue lead re-score")
             # Missed replies: catch customers left unanswered (AI down, server down, paused chats).
             from app.services import reply_recovery
 

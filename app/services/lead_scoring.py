@@ -1,6 +1,7 @@
 """Rule-based lead scoring (0–100 → hot|warm|cold). No OpenAI calls."""
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
@@ -65,6 +66,11 @@ NEGATIVE_KEYWORDS = (
 )
 
 
+SCORING_WINDOW_DAYS = 14
+HOT_NEEDS_ACTIVITY_DAYS = 7
+COLD_AFTER_DAYS = 30
+
+
 def map_score_label(lead_score: int) -> str:
     if lead_score >= 70:
         return "hot"
@@ -81,8 +87,21 @@ def _text_blob(messages: list[dict]) -> str:
     return " ".join(parts).lower()
 
 
+def _has_word(text: str, keyword: str) -> bool:
+    if not (keyword[0].isalnum() and keyword[-1].isalnum()):
+        return keyword in text
+    return re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", text) is not None
+
+
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
-    return any(k in text for k in keywords)
+    return any(_has_word(text, k) for k in keywords)
+
+
+def _ts(m: dict) -> datetime | None:
+    ts = m.get("created_at")
+    if not isinstance(ts, datetime):
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
 def calculate_lead_score(
@@ -104,28 +123,22 @@ def calculate_lead_score(
         return 0, "cold"
 
     inbound = [m for m in (inbound_messages or []) if m.get("direction") == "inbound"]
-    blob = _text_blob(inbound)
+    stamps = [t for t in (_ts(m) for m in inbound) if t is not None]
+    latest = max(stamps) if stamps else None
+    cutoff = now - timedelta(days=SCORING_WINDOW_DAYS)
+    recent = [m for m in inbound if (_ts(m) or now) >= cutoff]
+    blob = _text_blob(recent)
 
     if _contains_any(blob, NEGATIVE_KEYWORDS):
         return 0, "cold"
 
     score = 0
 
-    # Engagement from inbound volume
-    n = len(inbound)
+    n = len(recent)
     if n == 0:
         return 0, "cold"
     score += min(40, n * 8)
 
-    # Recency of latest inbound
-    latest: datetime | None = None
-    for m in inbound:
-        ts = m.get("created_at")
-        if isinstance(ts, datetime):
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if latest is None or ts > latest:
-                latest = ts
     if latest is not None:
         age = now - latest
         if age <= timedelta(hours=24):
@@ -141,6 +154,13 @@ def calculate_lead_score(
         score += 10
     if _contains_any(blob, BOOKING_KEYWORDS):
         score += 20
+
+    if latest is not None:
+        age = now - latest
+        if age > timedelta(days=COLD_AFTER_DAYS):
+            score = min(score, 39)
+        elif age > timedelta(days=HOT_NEEDS_ACTIVITY_DAYS):
+            score = min(score, 69)
 
     score = max(0, min(100, score))
     return score, map_score_label(score)
@@ -187,3 +207,25 @@ async def recalculate_lead_score(user_id: str, lead_id: str) -> Optional[dict[st
     lead["score"] = label
     lead["score_updated_at"] = now
     return lead
+
+
+def rescore_stale_leads(limit: int = 2000) -> int:
+    """Hot/warm scores only change when the contact messages, so they would never cool down:
+    re-score those older than a day. Leaves `updated_at` alone so chat order doesn't jump."""
+    from app.workers.tasks import _db
+
+    db = _db()
+    now = datetime.now(timezone.utc)
+    stale = db.leads.find(
+        {"score": {"$in": ["hot", "warm"]}, "$or": [{"score_updated_at": {"$lt": now - timedelta(days=1)}}, {"score_updated_at": None}]},
+        {"user_id": 1, "phone": 1, "blacklisted": 1},
+    ).limit(limit)
+    done = 0
+    for lead in stale:
+        uid, lid = lead.get("user_id"), str(lead["_id"])
+        inbound = list(db.messages.find({"user_id": uid, "lead_id": lid, "direction": "inbound"}, {"message": 1, "direction": 1, "created_at": 1}))
+        blacklisted = bool(lead.get("blacklisted")) or bool(lead.get("phone") and db.blacklist.find_one({"user_id": uid, "phone": lead["phone"]}))
+        lead_score, label = calculate_lead_score(blacklisted=blacklisted, inbound_messages=inbound, now=now)
+        db.leads.update_one({"_id": lead["_id"]}, {"$set": {"lead_score": lead_score, "score": label, "score_updated_at": now}})
+        done += 1
+    return done
