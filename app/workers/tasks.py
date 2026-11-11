@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from bson import ObjectId
@@ -729,7 +730,75 @@ def _answered_after(db, lead_id: str, after, *, catch_up_for: str | None = None)
     return db.messages.find_one(q, {"_id": 1}) is not None
 
 
+_REPLY_LOCK_TTL_SECONDS = 120
+_REPLY_LOCK_WAIT_SECONDS = 90
+
+
+def _acquire_reply_lock(lead_id: str) -> Optional[str]:
+    token = str(ObjectId())
+    key = f"ai_reply_lock:{lead_id}"
+    try:
+        r = _redis()
+        deadline = time.monotonic() + _REPLY_LOCK_WAIT_SECONDS
+        while not r.set(key, token, nx=True, ex=_REPLY_LOCK_TTL_SECONDS):
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(1)
+        return token
+    except Exception:
+        return None
+
+
+def _release_reply_lock(lead_id: str, token: Optional[str]) -> None:
+    if not token:
+        return
+    key = f"ai_reply_lock:{lead_id}"
+    try:
+        r = _redis()
+        held = r.get(key)
+        if (held.decode() if isinstance(held, bytes) else held) == token:
+            r.delete(key)
+    except Exception:
+        pass
+
+
+def _newer_inbound_exists(db, user_id: str, lead_id: str, trigger_message_id: str | None) -> bool:
+    tid = (trigger_message_id or "").strip()
+    if not ObjectId.is_valid(tid):
+        return False
+    trigger = db.messages.find_one({"_id": ObjectId(tid), "lead_id": lead_id, "direction": "inbound"}, {"created_at": 1})
+    if not trigger or not trigger.get("created_at"):
+        return False
+    return db.messages.find_one(
+        {"user_id": user_id, "lead_id": lead_id, "direction": "inbound", "created_at": {"$gt": trigger["created_at"]}},
+        {"_id": 1},
+    ) is not None
+
+
 def generate_and_send_ai_reply(
+    user_id: str,
+    lead_id: str,
+    provider: str | None = None,
+    trigger_message_id: str | None = None,
+    catch_up_minutes: int | None = None,
+) -> None:
+    """One reply at a time per contact. When the contact has sent newer messages, the newest
+    message's job answers them together instead of each message getting its own reply."""
+    db = _db()
+    if _newer_inbound_exists(db, user_id, lead_id, trigger_message_id):
+        logger.info("ai_reply skipped: newer inbound will answer lead_id=%s trigger=%s", lead_id, trigger_message_id)
+        return
+    token = _acquire_reply_lock(lead_id)
+    try:
+        if _newer_inbound_exists(db, user_id, lead_id, trigger_message_id):
+            logger.info("ai_reply skipped: newer inbound will answer lead_id=%s trigger=%s", lead_id, trigger_message_id)
+            return
+        _generate_and_send_ai_reply(user_id, lead_id, provider, trigger_message_id, catch_up_minutes)
+    finally:
+        _release_reply_lock(lead_id, token)
+
+
+def _generate_and_send_ai_reply(
     user_id: str,
     lead_id: str,
     provider: str | None = None,
@@ -1061,6 +1130,9 @@ def generate_and_send_ai_reply(
         "catch_up_for": trigger_id if catch_up_minutes else None,
         "created_at": datetime.now(timezone.utc),
     }
+    if _newer_inbound_exists(db, user_id, lead_id, trigger_id):
+        logger.info("ai_reply dropped: newer inbound arrived while writing lead_id=%s trigger=%s", lead_id, trigger_id)
+        return
     res = db.messages.insert_one(msg_doc)
     msg_doc["_id"] = res.inserted_id
     _publish(user_id, "message:new", _serialize(msg_doc))
