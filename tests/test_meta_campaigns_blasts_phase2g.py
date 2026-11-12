@@ -70,6 +70,7 @@ def _create_db(user_id: ObjectId, tmpl=None, camp_oid=None):
     db.campaigns.insert_one = AsyncMock(return_value=SimpleNamespace(inserted_id=camp_oid))
     db.campaigns.update_one = AsyncMock()
     db.campaigns.delete_one = AsyncMock()
+    db.whatsapp_senders.find_one = AsyncMock(return_value=None)
     db.campaigns.find_one = AsyncMock(
         return_value={"_id": camp_oid, "user_id": str(user_id), "name": "M", "provider": "meta"}
     )

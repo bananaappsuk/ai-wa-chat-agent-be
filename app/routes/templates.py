@@ -387,20 +387,46 @@ async def update_template(
     return _serialize_template(doc or {})
 
 
+_ACTIVE_CAMPAIGN = ("running", "queued", "scheduled", "paused", "sending")
+_ACTIVE_BLAST = ("queued", "sending", "paused")
+
+
+async def _template_in_use(db, user_id: str, template_id: str, content_sid: str | None) -> str | None:
+    match = [{"template_id": template_id}] + ([{"content_sid": content_sid}] if content_sid else [])
+    c = await db.campaigns.find_one({"user_id": user_id, "status": {"$in": list(_ACTIVE_CAMPAIGN)}, "$or": match}, {"name": 1})
+    if c:
+        return f"campaign '{c.get('name')}'"
+    b = await db.blast_campaigns.find_one({"user_id": user_id, "status": {"$in": list(_ACTIVE_BLAST)}, "$or": match}, {"name": 1})
+    return f"blast '{b.get('name')}'" if b else None
+
+
 @router.delete("/{template_id}", status_code=204)
-async def delete_template(template_id: str, user: dict = Depends(current_user)) -> None:
+async def delete_template(template_id: str, remote: bool = Query(False), user: dict = Depends(current_user)) -> None:
+    """Remove a template from the library; with remote=true also delete it on Twilio/WhatsApp."""
     require_object_id(template_id)
-    res = await get_db().templates.delete_one(
-        {"_id": ObjectId(template_id), "user_id": str(user["_id"])}
-    )
-    if res.deleted_count == 0:
+    user_id = str(user["_id"])
+    db = get_db()
+    doc = await db.templates.find_one({"_id": ObjectId(template_id), "user_id": user_id})
+    if not doc:
         raise HTTPException(status_code=404, detail="Not found")
-    audit(
-        "template.delete",
-        user_id=str(user["_id"]),
-        target_id=template_id,
-        request_id=get_request_id(),
-    )
+    if remote:
+        if (doc.get("provider") or "twilio_content") == "meta":
+            raise HTTPException(status_code=400, detail="Meta templates are deleted in WhatsApp Manager; this can only remove it from the app.")
+        in_use = await _template_in_use(db, user_id, template_id, doc.get("content_sid"))
+        if in_use:
+            raise HTTPException(status_code=409, detail=f"It's being used by {in_use} — finish, pause-and-cancel or delete that first.")
+        sid = (doc.get("content_sid") or "").strip()
+        if sid:
+            from fastapi.concurrency import run_in_threadpool
+
+            from app.services import twilio_service
+
+            try:
+                await run_in_threadpool(twilio_service.delete_whatsapp_template, sid)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+    await db.templates.delete_one({"_id": doc["_id"]})
+    audit("template.delete", user_id=user_id, target_id=template_id, request_id=get_request_id(), extra={"remote": remote})
 
 
 async def get_approved_template(user_id: str, template_id: str) -> dict:

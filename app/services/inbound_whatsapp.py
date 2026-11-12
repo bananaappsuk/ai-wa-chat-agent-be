@@ -146,6 +146,11 @@ async def _resolve_tenant(db, inbound: InboundMessage) -> dict | None:
     if not ident:
         return None
     if provider == "twilio":
+        from app.services.senders import tenant_user_for_number
+
+        user = await tenant_user_for_number(db, ident)
+        if user:
+            return user
         user = await db.users.find_one({"twilio_whatsapp_to": ident})
         if not user:
             norm = lead_service._norm_phone(ident)
@@ -254,7 +259,9 @@ async def process_inbound_message(
     from app.services.consent_ops import apply_consent_change
     from app.services.whatsapp_consent import is_optout_keyword, is_optin_keyword
 
-    if _is_self_sender(inbound, customer_phone, user):
+    from app.services.senders import is_own_sender
+
+    if _is_self_sender(inbound, customer_phone, user) or (provider == "twilio" and await is_own_sender(db, customer_phone)):
         logger.warning(
             "Ignoring self-sender inbound webhook From=%s user_id=%s id=%s",
             customer_phone,
@@ -352,8 +359,10 @@ async def process_inbound_message(
         "created_at": utcnow(),
         "message_type": (media_meta.get("message_type") or inbound.message_type or "text"),
     }
+    business_number = normalize_e164(inbound.business_identifier) if provider == "twilio" else None
     if provider == "twilio":
         msg_doc["twilio_sid"] = mid or None
+        msg_doc["business_number"] = business_number
     if media_meta:
         for key in ("media_items", "media_url", "media_content_type", "media_filename"):
             if key in media_meta:
@@ -363,6 +372,9 @@ async def process_inbound_message(
         res = await db.messages.insert_one(msg_doc)
     except DuplicateKeyError:
         return InboundResult(outcome="duplicate", user_id=user_id, lead_id=lead_id)
+    if business_number:
+        await db.leads.update_one({"_id": lead["_id"]}, {"$set": {"last_business_number": business_number}})
+        lead["last_business_number"] = business_number
     msg_doc["_id"] = res.inserted_id
     trigger_message_id = str(res.inserted_id)
     await ws_manager.push(user_id, "message:new", serialize(msg_doc))

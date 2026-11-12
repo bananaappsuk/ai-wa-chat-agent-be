@@ -437,9 +437,16 @@ async def create_campaign(payload: CampaignCreate, user: dict = Depends(current_
     if (ai_fields.get("content_mode") or content_mode) == "ai_agent":
         provider = "twilio"
 
+    from app.services.senders import resolve_sender
+
+    try:
+        sender_number = await resolve_sender(db, user_id, payload.sender)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     doc = {
         "user_id": user_id,
         "name": payload.name.strip(),
+        "sender_number": sender_number,
         "description": (payload.description or "").strip() or None,
         "message": (payload.message or "").strip() or None,
         "template_id": template_id,
@@ -512,6 +519,13 @@ async def update_campaign(cid: str, payload: CampaignUpdate, user: dict = Depend
 
     update = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
     update.pop("status", None)  # engine owns status
+    if "sender" in update:
+        from app.services.senders import resolve_sender
+
+        try:
+            update["sender_number"] = await resolve_sender(get_db(), user_id, update.pop("sender"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Strip AI keys — re-applied via helper for validation
     for k in list(update.keys()):
         if k in (
@@ -1808,9 +1822,16 @@ async def create_blast(payload: BlastCreate, user: dict = Depends(current_user))
 
     assert_bulk_enqueue_allowed(estimated_jobs=len(payload.recipients))
 
+    from app.services.senders import resolve_sender
+
+    try:
+        sender_number = await resolve_sender(db, user_id, payload.sender) if provider == "twilio" else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     blast_doc = {
         "user_id": user_id,
         "name": payload.name.strip(),
+        "sender_number": sender_number,
         "message": message or (f"[media]" if media_url else ""),
         "template_id": template_id,
         "provider": provider,

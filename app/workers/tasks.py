@@ -392,12 +392,16 @@ def send_outbound_message(
                 },
             )
         else:
+            from app.services.senders import reply_from_sync
+
+            from_number = reply_from_sync(db, user_id, lead)
             result = twilio_service.send_whatsapp(
                 lead["phone"],
                 body=send_body if not content_sid else None,
                 media_url=resolved_media,
                 content_sid=content_sid,
                 content_variables=content_variables,
+                from_number=from_number,
             )
             provider_status = (result.get("status") or "").strip().lower()
             app_status = "sent" if provider_status in ("", "queued", "accepted") else provider_status
@@ -414,7 +418,7 @@ def send_outbound_message(
                         "consent_status_at_send": elig.consent_status,
                         "window_open_at_send": elig.window_status == "open",
                         "policy_decision": "allowed",
-                        "sender_number": (settings.TWILIO_WHATSAPP_FROM or "")[:40] or None,
+                        "sender_number": from_number or (settings.TWILIO_WHATSAPP_FROM or "")[:40] or None,
                     }
                 },
             )
@@ -535,7 +539,9 @@ def send_welcome_and_terms(user_id: str, lead_id: str) -> None:
         if not text:
             continue
         try:
-            result = twilio_service.send_whatsapp(lead["phone"], body=text)
+            from app.services.senders import reply_from_sync
+
+            result = twilio_service.send_whatsapp(lead["phone"], body=text, from_number=reply_from_sync(db, user_id, lead))
             msg_doc = {
                 "user_id": user_id,
                 "lead_id": lead_id,
@@ -1180,11 +1186,15 @@ def _generate_and_send_ai_reply(
         return
 
     try:
+        from app.services.senders import reply_from_sync
+
+        reply_from = reply_from_sync(db, user_id, lead) if send_provider == "twilio" else None
         result = send_whatsapp_text(
             provider=send_provider,
             to=lead["phone"],
             text=reply,
             user=user,
+            from_number=reply_from,
         )
         set_fields: dict = {
             "status": "sent" if send_provider == "meta" else (result.get("status") or "sent"),
@@ -1196,6 +1206,7 @@ def _generate_and_send_ai_reply(
             raw_status = (result.get("status") or "sent")
             set_fields["status"] = raw_status
             set_fields["twilio_sid"] = result.get("provider_message_id")
+            set_fields["sender_number"] = reply_from or (settings.TWILIO_WHATSAPP_FROM or "")[:40] or None
         db.messages.update_one(
             {"_id": res.inserted_id},
             {"$set": set_fields},
@@ -1632,13 +1643,13 @@ def _process_blast_recipient(
                     except ValueError as var_exc:
                         raise RuntimeError(str(var_exc)) from var_exc
                 result = twilio_service.send_whatsapp(
-                    phone, content_sid=content_sid, content_variables=content_variables
+                    phone, content_sid=content_sid, content_variables=content_variables, from_number=blast.get("sender_number")
                 )
             else:
                 resolved_media = _resolve_media_url(media_url) if media_url else None
                 if not body and not resolved_media:
                     raise RuntimeError("Blast has no message body or media")
-                result = twilio_service.send_whatsapp(phone, body=body, media_url=resolved_media)
+                result = twilio_service.send_whatsapp(phone, body=body, media_url=resolved_media, from_number=blast.get("sender_number"))
 
             if camp_prov != "meta":
                 provider_status = (result.get("status") or "").strip().lower()

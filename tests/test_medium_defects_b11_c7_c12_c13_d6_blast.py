@@ -215,6 +215,7 @@ async def test_webhook_ignores_self_sender_and_skips_lead_creation():
 
     db = MagicMock()
     db.webhook_events.find_one = AsyncMock(return_value=None)
+    db.whatsapp_senders.find_one = AsyncMock(return_value=None)
     db.webhook_events.insert_one = AsyncMock()
     db.users.find_one = AsyncMock(return_value={"_id": user_id, "twilio_whatsapp_to": "+447700900999", "plan": "business", "subscription_status": "active"})
     db.activity_events.insert_one = AsyncMock(return_value=SimpleNamespace(inserted_id=ObjectId()))
@@ -250,6 +251,7 @@ async def test_webhook_processes_normal_inbound_when_not_self_sender():
 
     db = MagicMock()
     db.webhook_events.find_one = AsyncMock(return_value=None)
+    db.whatsapp_senders.find_one = AsyncMock(return_value=None)
     db.webhook_events.insert_one = AsyncMock()
     db.users.find_one = AsyncMock(return_value={"_id": user_id, "twilio_whatsapp_to": "+447700900999", "plan": "business", "subscription_status": "active"})
     db.blacklist.find_one = AsyncMock(return_value=None)

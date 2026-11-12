@@ -236,3 +236,68 @@ def refresh_app_created_templates(limit: int = 50) -> int:
                 dedupe_key=f"template_status:{t['_id']}:{wa}",
             )
     return changed
+
+
+_LIVE_MESSAGES = {
+    "paused": ("Template paused by WhatsApp: {name}",
+               "WhatsApp paused it because people reported or blocked it. Sends with it fail until it's approved again "
+               "(usually a few hours)."),
+    "disabled": ("Template disabled by WhatsApp: {name}", "It can't be sent any more. Create a new template to keep sending."),
+    "rejected": ("Template rejected by WhatsApp: {name}", "It can't be sent. Duplicate it, fix the text and submit again."),
+    "approved": ("Template approved again: {name}", "WhatsApp lifted the pause — you can send it again."),
+}
+
+
+def _pause_sends_using(db, user_id: str, template_id: str, content_sid: str, status: str) -> int:
+    from datetime import datetime, timezone
+
+    reason = f"WhatsApp {status} the template — press Resume once it's approved again."
+    match = {"user_id": user_id, "$or": [{"template_id": template_id}, {"content_sid": content_sid}]}
+    now = datetime.now(timezone.utc)
+    b = db.blast_campaigns.update_many({**match, "status": {"$in": ["queued", "sending"]}},
+                                       {"$set": {"status": "paused", "pause_reason": reason, "updated_at": now}})
+    c = db.campaigns.update_many({**match, "status": {"$in": ["queued", "running"]}},
+                                 {"$set": {"status": "paused", "pause_reason": reason, "paused_at": now, "updated_at": now}})
+    return b.modified_count + c.modified_count
+
+
+def refresh_live_templates(limit: int = 200) -> int:
+    """Watch templates that are live (approved) or paused: when WhatsApp pauses, disables or
+    re-approves one, update it and tell the user."""
+    from datetime import datetime, timezone
+
+    from app.services import twilio_service
+    from app.services.notifications import create_notification_sync
+    from app.workers.tasks import _db
+
+    db = _db()
+    now = datetime.now(timezone.utc)
+    watched = db.templates.find(
+        {"provider": {"$in": [None, "twilio_content"]}, "content_sid": {"$nin": [None, ""]},
+         "whatsapp_approval_status": {"$in": ["approved", "paused"]}},
+        {"user_id": 1, "name": 1, "content_sid": 1, "whatsapp_approval_status": 1, "status": 1},
+    ).limit(limit)
+    changed = 0
+    for t in watched:
+        try:
+            info = twilio_service.get_content_template_info(t["content_sid"])
+        except Exception:
+            continue
+        old, new = t.get("whatsapp_approval_status"), info.get("whatsapp_status")
+        if not new or new == "unknown" or new == old:
+            continue
+        update = {"whatsapp_approval_status": new, "whatsapp_approval_checked_at": now,
+                  "whatsapp_rejection_reason": info.get("rejection_reason")}
+        if new in ("disabled", "rejected") and t.get("status") == "approved":
+            update["status"] = "rejected"
+        db.templates.update_one({"_id": t["_id"]}, {"$set": update})
+        stopped = _pause_sends_using(db, t["user_id"], str(t["_id"]), t["content_sid"], new) if new in ("paused", "disabled", "rejected") else 0
+        msg = _LIVE_MESSAGES.get(new) if not (new == "approved" and old != "paused") else None
+        if msg:
+            changed += 1
+            extra = f" {stopped} running blast/campaign{'s' if stopped != 1 else ''} using it {'were' if stopped != 1 else 'was'} paused — press Resume once it's approved again." if stopped else ""
+            create_notification_sync(
+                db, user_id=t["user_id"], type="system", title=msg[0].format(name=t.get("name")), message=msg[1] + extra,
+                resource_type="template", resource_id=str(t["_id"]), dedupe_key=f"template_live:{t['_id']}:{new}:{now:%Y%m%d%H}",
+            )
+    return changed

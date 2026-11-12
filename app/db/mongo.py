@@ -101,6 +101,8 @@ async def init_indexes() -> None:
     """Idempotent index creation — safe to run on every startup."""
     db = get_db()
     await db.users.create_index("email", unique=True)
+    await db.whatsapp_senders.create_index("phone", unique=True)
+    await db.whatsapp_senders.create_index("user_id")
     # Unique only when a string number is set — many users may have no WhatsApp number.
     await db.users.create_index(
         "twilio_whatsapp_to",

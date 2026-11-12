@@ -73,6 +73,8 @@ def run_forever() -> None:
     last_recovery_scan = 0.0
     last_rescore = 0.0
     last_template_check = 0.0
+    last_live_template_check = 0.0
+    last_sender_check = 0.0
     last_inbound_reconcile: float | None = None
     logger.info("scheduler starting owner=%s interval=%ss", _OWNER, interval)
 
@@ -89,6 +91,22 @@ def run_forever() -> None:
 
                 enqueue(kb_tasks.refresh_due_kb_sources)
                 last_kb_refresh = time.monotonic()
+            if time.monotonic() - last_sender_check >= 600:
+                from app.services import senders
+
+                try:
+                    enqueue(senders.refresh_senders_sync)
+                    last_sender_check = time.monotonic()
+                except Exception:
+                    logger.exception("could not queue WhatsApp number check")
+            if time.monotonic() - last_live_template_check >= 300:
+                from app.services import whatsapp_template_approval
+
+                try:
+                    enqueue(whatsapp_template_approval.refresh_live_templates)
+                    last_live_template_check = time.monotonic()
+                except Exception:
+                    logger.exception("could not queue live template check")
             if time.monotonic() - last_template_check >= 120:
                 from app.services import whatsapp_template_approval
 

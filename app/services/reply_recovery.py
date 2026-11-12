@@ -310,7 +310,10 @@ def reconcile_twilio_inbound(*, lookback_minutes: Optional[int] = None, replay_f
     db = _db()
     replay_fn = replay_fn or _replay_webhook
     since = _now() - timedelta(minutes=int(lookback_minutes or settings.TWILIO_INBOUND_LOOKBACK_MINUTES))
+    from app.services.senders import all_sender_numbers_sync
+
     numbers = {u.get("twilio_whatsapp_to") for u in db.users.find({"twilio_whatsapp_to": {"$nin": [None, ""]}}, {"twilio_whatsapp_to": 1})}
+    numbers |= all_sender_numbers_sync(db)
     out = {"checked": 0, "missing": 0, "replayed": 0}
     try:
         client = client or _twilio_client()

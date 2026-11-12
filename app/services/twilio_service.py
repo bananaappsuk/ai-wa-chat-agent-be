@@ -93,14 +93,18 @@ def send_whatsapp(
     status_callback: Optional[str] = None,
     content_sid: Optional[str] = None,
     content_variables: Optional[dict] = None,
+    from_number: Optional[str] = None,
 ) -> dict:
+    """`from_number` is the sender chosen in the app; without it the env sender is used."""
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
         raise RuntimeError("Twilio credentials not configured")
     kwargs: dict = {
         "to": to_whatsapp(to),
     }
     msid = (settings.TWILIO_MESSAGING_SERVICE_SID or "").strip()
-    if msid:
+    if from_number:
+        kwargs["from_"] = to_whatsapp(from_number)
+    elif msid:
         kwargs["messaging_service_sid"] = msid
     else:
         from_num = (settings.TWILIO_WHATSAPP_FROM or "").strip()
@@ -345,6 +349,22 @@ def create_whatsapp_template(
         raise RuntimeError(f"Template created ({sid}) but WhatsApp submission failed: {_twilio_error(r)}")
     data = r.json()
     return {"content_sid": sid, "status": data.get("status"), "rejection_reason": data.get("rejection_reason") or None}
+
+
+def delete_whatsapp_template(content_sid: str) -> None:
+    """Delete a Content template on Twilio and its WhatsApp copy. Already gone counts as done."""
+    import httpx
+
+    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
+        raise RuntimeError("Twilio credentials not configured")
+    r = httpx.delete(
+        f"https://content.twilio.com/v1/Content/{content_sid}",
+        params={"deleteInWaba": "true"},
+        auth=(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
+        timeout=httpx.Timeout(30.0, connect=10.0),
+    )
+    if r.status_code >= 300 and r.status_code != 404:
+        raise RuntimeError(f"Twilio could not delete the template: {_twilio_error(r)}")
 
 
 def _twilio_error(r) -> str:

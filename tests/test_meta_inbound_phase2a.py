@@ -219,6 +219,7 @@ class MemDB:
         self.consent_events = MemColl()
         self.activity_events = MemColl()
         self.notifications = MemColl()
+        self.whatsapp_senders = MemColl()
 
 
 def _user(pnid: str) -> dict:

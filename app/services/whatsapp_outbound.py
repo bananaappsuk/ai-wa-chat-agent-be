@@ -17,6 +17,7 @@ def send_whatsapp_text(
     to: str,
     text: str,
     user: Optional[dict] = None,
+    from_number: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Send a free-form text message on the given provider.
@@ -25,7 +26,7 @@ def send_whatsapp_text(
     """
     prov = (provider or "").strip().lower()
     if prov == "twilio":
-        result = twilio_service.send_whatsapp(to, body=text)
+        result = twilio_service.send_whatsapp(to, body=text, from_number=from_number)
         sid = result.get("sid")
         return {
             "provider": "twilio",

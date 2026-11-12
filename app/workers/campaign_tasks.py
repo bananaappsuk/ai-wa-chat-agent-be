@@ -754,6 +754,7 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                     phone,
                     content_sid=content_sid,
                     content_variables=content_variables,
+                    from_number=campaign.get("sender_number"),
                 )
                 # Save what the contact actually received (rendered template), not a template ID,
                 # so Live Chat and the AI know what a reply is answering.
@@ -769,7 +770,7 @@ def send_campaign_recipient(user_id: str, campaign_id: str, recipient_id: str) -
                 resolved_media = _resolve_media_url(media_url) if media_url else None
                 if not body and not resolved_media:
                     raise RuntimeError("empty message")
-                result = twilio_service.send_whatsapp(phone, body=body, media_url=resolved_media)
+                result = twilio_service.send_whatsapp(phone, body=body, media_url=resolved_media, from_number=campaign.get("sender_number"))
                 display = body or "[media]"
 
             if camp_prov != "meta":

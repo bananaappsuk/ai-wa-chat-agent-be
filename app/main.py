@@ -35,6 +35,7 @@ from app.routes import (
     analytics,
     billing,
     knowledge,
+    senders as senders_route,
 )
 from app.observability import metrics as metrics_route
 from app.workers.queue import close_redis, get_redis
@@ -111,6 +112,8 @@ async def _scheduled_campaigns_loop() -> None:
     last_recovery_scan = 0.0
     last_rescore = 0.0
     last_template_check = 0.0
+    last_live_template_check = 0.0
+    last_sender_check = 0.0
     last_inbound_reconcile: float | None = None
     while True:
         try:
@@ -119,6 +122,22 @@ async def _scheduled_campaigns_loop() -> None:
             if loop.time() - last_kb_refresh >= 600:  # knowledge-base auto-refresh check
                 enqueue(kb_tasks.refresh_due_kb_sources)
                 last_kb_refresh = loop.time()
+            if loop.time() - last_sender_check >= 600:
+                from app.services import senders
+
+                try:
+                    enqueue(senders.refresh_senders_sync)
+                    last_sender_check = loop.time()
+                except Exception:
+                    logger.exception("could not queue WhatsApp number check")
+            if loop.time() - last_live_template_check >= 300:
+                from app.services import whatsapp_template_approval
+
+                try:
+                    enqueue(whatsapp_template_approval.refresh_live_templates)
+                    last_live_template_check = loop.time()
+                except Exception:
+                    logger.exception("could not queue live template check")
             if loop.time() - last_template_check >= 120:
                 from app.services import whatsapp_template_approval
 
@@ -245,6 +264,7 @@ app.include_router(conversations.router, prefix=api_prefix)
 app.include_router(analytics.router, prefix=api_prefix)
 app.include_router(billing.router, prefix=api_prefix)
 app.include_router(knowledge.router, prefix=api_prefix)
+app.include_router(senders_route.router, prefix=api_prefix)
 app.include_router(ws_route.router)
 app.include_router(metrics_route.router)
 

@@ -65,6 +65,7 @@ def _topic_list(values: Optional[list[str]], *, max_items: int = 20, max_len: in
 
 class CampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+    sender: Optional[str] = Field(default=None, max_length=20)
     description: Optional[str] = Field(default=None, max_length=500)
     message: Optional[str] = Field(default=None, max_length=1600)
     media_url: Optional[str] = Field(default=None, max_length=500)
@@ -188,6 +189,7 @@ class CampaignCreate(BaseModel):
 
 class CampaignUpdate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=100)
+    sender: Optional[str] = Field(default=None, max_length=20)
     description: Optional[str] = Field(default=None, max_length=500)
     message: Optional[str] = Field(default=None, max_length=1600)
     media_url: Optional[str] = Field(default=None, max_length=500)
@@ -267,6 +269,7 @@ class BlastCreate(BaseModel):
     message: Optional[str] = Field(default=None, max_length=1600)
     recipients: list[str] = Field(min_length=1, max_length=5000)
     contacts: Optional[list[BlastContact]] = Field(default=None, max_length=5000)
+    sender: Optional[str] = Field(default=None, max_length=20)
     template_id: Optional[str] = None
     content_variables: Optional[dict[str, str]] = None
     media_url: Optional[str] = Field(default=None, max_length=500)
