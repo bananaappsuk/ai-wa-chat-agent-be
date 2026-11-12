@@ -62,7 +62,9 @@ async def update_sender(sender_id: str, payload: SenderUpdate, user: dict = Depe
         update["label"] = payload.label.strip()
     if payload.enabled is not None:
         update["enabled"] = payload.enabled
-        if not payload.enabled:
+        if payload.enabled:
+            update["restricted"] = False
+        else:
             update["is_default"] = False
     if payload.is_default:
         if payload.enabled is False or (payload.enabled is None and not doc.get("enabled")):

@@ -196,3 +196,41 @@ def refresh_senders_sync() -> int:
                                      resource_type="whatsapp_sender", resource_id=str(doc["_id"]),
                                      dedupe_key=f"sender:{doc['phone']}:{title}:{now:%Y%m%d%H}")
     return notified
+
+
+RESTRICTED_CODES = {"63051"}
+
+
+async def mark_sender_restricted(db, from_number: Optional[str], code: str) -> bool:
+    """WhatsApp refused a message because Meta restricted the sending number: switch it off,
+    move the default to another working number, pause sends using it and tell the owner."""
+    from app.services.notifications import create_notification
+
+    phone = normalize_e164(from_number)
+    doc = await db.whatsapp_senders.find_one({"phone": phone}) if phone else None
+    if not doc or doc.get("restricted"):
+        return False
+    now = datetime.now(timezone.utc)
+    await db.whatsapp_senders.update_one({"_id": doc["_id"]}, {"$set": {"restricted": True, "restricted_code": code, "restricted_at": now,
+                                                                     "enabled": False, "is_default": False}})
+    uid = doc["user_id"]
+    new_default = None
+    if doc.get("is_default"):
+        pick = await db.whatsapp_senders.find_one({"user_id": uid, "enabled": True, "restricted": {"$ne": True}, "twilio_status": "ONLINE"})
+        if pick:
+            await db.whatsapp_senders.update_one({"_id": pick["_id"]}, {"$set": {"is_default": True}})
+            new_default = pick["phone"]
+    reason = f"WhatsApp restricted {phone} (error {code}) — choose another number and press Resume."
+    paused = 0
+    for coll, active in (("blast_campaigns", ["queued", "sending"]), ("campaigns", ["queued", "running"])):
+        res = await db[coll].update_many({"user_id": uid, "sender_number": phone, "status": {"$in": active}},
+                                         {"$set": {"status": "paused", "pause_reason": reason, "updated_at": now}})
+        paused += res.modified_count
+    msg = f"Meta restricted {phone}, so WhatsApp is refusing its messages (error {code}). It's switched off in Settings → WhatsApp numbers."
+    if doc.get("is_default"):
+        msg += f" New sends now go from {new_default}." if new_default else " There's no other working number — add or fix one before sending again."
+    if paused:
+        msg += f" {paused} running blast/campaign{'s' if paused != 1 else ''} using it {'were' if paused != 1 else 'was'} paused."
+    await create_notification(db, user_id=uid, type="system", title=f"WhatsApp blocked a number: {phone}", message=msg,
+                              resource_type="whatsapp_sender", resource_id=str(doc["_id"]), dedupe_key=f"sender_restricted:{phone}:{code}")
+    return True

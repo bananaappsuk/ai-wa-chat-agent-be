@@ -221,3 +221,61 @@ def test_number_check_alerts_on_offline_quality_and_webhook_changes():
     assert titles == ["Quality back to MEDIUM", "Quality dropped to LOW", "Replies to a number aren't reaching the app", "WhatsApp number offline"]
     assert "default sender" in db.notifications.find_one({"title": "WhatsApp number offline"})["message"]
     assert db.whatsapp_senders.find_one({"phone": A})["twilio_status"] == "OFFLINE"
+
+
+@pytest.mark.asyncio
+async def test_a_restricted_number_is_switched_off_and_sends_move_to_another():
+    db = AsyncMongoMockClient().db
+    uid = str(UID)
+    await db.whatsapp_senders.insert_many([
+        {"user_id": uid, "phone": A, "enabled": True, "is_default": True, "twilio_status": "ONLINE"},
+        {"user_id": uid, "phone": B, "enabled": True, "is_default": False, "twilio_status": "ONLINE"},
+    ])
+    blast = (await db.blast_campaigns.insert_one({"user_id": uid, "status": "sending", "sender_number": A})).inserted_id
+    other = (await db.blast_campaigns.insert_one({"user_id": uid, "status": "sending", "sender_number": B})).inserted_id
+    with patch("app.services.notifications.ws_manager", MagicMock(push=AsyncMock()), create=True):
+        assert await senders.mark_sender_restricted(db, f"whatsapp:{A}", "63051") is True
+        assert await senders.mark_sender_restricted(db, f"whatsapp:{A}", "63051") is False
+        assert await senders.mark_sender_restricted(db, "whatsapp:+447700900999", "63051") is False
+    a = await db.whatsapp_senders.find_one({"phone": A})
+    assert a["restricted"] and not a["enabled"] and not a["is_default"]
+    assert (await db.whatsapp_senders.find_one({"phone": B}))["is_default"] is True
+    assert (await db.blast_campaigns.find_one({"_id": blast}))["status"] == "paused"
+    assert (await db.blast_campaigns.find_one({"_id": other}))["status"] == "sending"
+    n = await db.notifications.find_one({"title": f"WhatsApp blocked a number: {A}"})
+    assert n and f"New sends now go from {B}" in n["message"] and "1 running blast/campaign using it was paused" in n["message"]
+
+
+@pytest.mark.asyncio
+async def test_switching_a_restricted_number_back_on_clears_the_flag():
+    from app.routes import senders as route
+
+    db = AsyncMongoMockClient().db
+    sid = str((await db.whatsapp_senders.insert_one({"user_id": str(UID), "phone": A, "enabled": False, "restricted": True})).inserted_id)
+    with patch.object(route, "get_db", return_value=db):
+        await route.update_sender(sid, route.SenderUpdate(enabled=True), user={"_id": UID})
+    doc = await db.whatsapp_senders.find_one({"phone": A})
+    assert doc["enabled"] and not doc["restricted"]
+
+
+def test_delivery_receipt_with_63051_marks_the_number():
+    from contextlib import asynccontextmanager
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.routes import webhook as wh
+
+    @asynccontextmanager
+    async def _noop(_app):
+        yield
+
+    app.router.lifespan_context = _noop
+    marked = AsyncMock(return_value=True)
+    with patch.object(wh.twilio_service, "validate_signature", return_value=True), \
+         patch.object(wh, "apply_twilio_status_callback", AsyncMock()), patch.object(wh.senders, "mark_sender_restricted", marked), \
+         patch.object(wh, "get_db", return_value=MagicMock()), patch("app.security.rate_limit.rate_limit_webhook"), TestClient(app) as c:
+        r1 = c.post("/api/webhook/twilio/status", data={"MessageSid": "SM1", "MessageStatus": "undelivered", "ErrorCode": "63051", "From": f"whatsapp:{A}"})
+        r2 = c.post("/api/webhook/twilio/status", data={"MessageSid": "SM2", "MessageStatus": "undelivered", "ErrorCode": "63024", "From": f"whatsapp:{A}"})
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert marked.await_count == 1 and marked.await_args.args[1:] == (f"whatsapp:{A}", "63051")

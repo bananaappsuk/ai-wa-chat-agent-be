@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Request, Response, HTTPException
 
 from app.db.mongo import get_db
-from app.services import twilio_service
+from app.services import senders, twilio_service
 from app.services.status_callback import apply_twilio_status_callback
 from app.services.media import parse_inbound_media, media_fields_from_items
 from app.services.inbound_whatsapp import InboundMessage, process_inbound_message
@@ -146,8 +146,8 @@ async def twilio_status_callback(request: Request) -> Response:
     status_raw = (params.get("MessageStatus") or params.get("SmsStatus") or "").strip()
     error_code = params.get("ErrorCode")
     error_message = params.get("ErrorMessage")
-    # To / From / AccountSid accepted for audit but never used as tenant identity.
-    _ = params.get("To"), params.get("From"), params.get("AccountSid")
+    # To / AccountSid accepted for audit but never used as tenant identity.
+    _ = params.get("To"), params.get("AccountSid")
 
     if not twilio_sid or not status_raw:
         logger.warning("Twilio status callback missing MessageSid or MessageStatus")
@@ -166,4 +166,9 @@ async def twilio_status_callback(request: Request) -> Response:
             twilio_sid[-6:] if len(twilio_sid) > 6 else "?",
         )
         raise HTTPException(status_code=500, detail="Temporary error processing status")
+    if error_code is not None and str(error_code) in senders.RESTRICTED_CODES:
+        try:
+            await senders.mark_sender_restricted(get_db(), params.get("From"), str(error_code))
+        except Exception:
+            logger.exception("Could not mark a restricted WhatsApp sender")
     return Response(content="<Response/>", media_type="application/xml")
