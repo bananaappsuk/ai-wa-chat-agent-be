@@ -9,6 +9,7 @@ from app.config import settings
 from app.services.phone_norm import normalize_e164
 
 COLLECTION = "whatsapp_senders"
+RESTRICTED_CODES = {"63051"}
 
 
 def expected_webhooks() -> dict[str, str]:
@@ -57,8 +58,35 @@ def fetch_twilio_senders() -> list[dict[str, Any]]:
             "callback_url": hook.get("callback_url"),
             "status_callback_url": hook.get("status_callback_url"),
             "webhook_ok": _webhook_ok(hook),
+            "last_error_code": _last_send_error(phone),
         })
     return out
+
+
+def _last_send_error(phone: str) -> Optional[str]:
+    """Error code of the number's most recent outbound message — the only way to see that Meta
+    restricted a number, since Twilio keeps reporting it ONLINE."""
+    import httpx
+
+    try:
+        r = httpx.get(
+            f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}/Messages.json",
+            params={"From": f"whatsapp:{phone}", "PageSize": 1},
+            auth=(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
+            timeout=httpx.Timeout(20.0, connect=10.0),
+        )
+        msgs = r.json().get("messages") or [] if r.status_code < 300 else []
+    except Exception:
+        return None
+    code = msgs[0].get("error_code") if msgs else None
+    return str(code) if code is not None else None
+
+
+def _restriction_fields(s: dict, doc: Optional[dict]) -> dict:
+    if s.get("last_error_code") in RESTRICTED_CODES and not (doc or {}).get("restricted"):
+        return {"restricted": True, "restricted_code": s["last_error_code"], "restricted_at": datetime.now(timezone.utc),
+                "enabled": False, "is_default": False}
+    return {}
 
 
 def fix_twilio_webhook(sender_sid: str) -> None:
@@ -89,10 +117,10 @@ async def sync_senders(db, user_id: str) -> list[dict]:
             continue
         fields = {**s, "synced_at": now}
         if existing:
-            await db.whatsapp_senders.update_one({"_id": existing["_id"]}, {"$set": fields})
+            await db.whatsapp_senders.update_one({"_id": existing["_id"]}, {"$set": {**fields, **_restriction_fields(s, existing)}})
         else:
-            await db.whatsapp_senders.insert_one({**fields, "user_id": user_id, "label": s["display_name"] or "",
-                                             "enabled": s["twilio_status"] == "ONLINE", "is_default": False, "created_at": now})
+            await db.whatsapp_senders.insert_one({**fields, "user_id": user_id, "label": "", "enabled": s["twilio_status"] == "ONLINE",
+                                                  "is_default": False, "created_at": now, **_restriction_fields(s, None)})
     await db.whatsapp_senders.update_many({"user_id": user_id, "phone": {"$nin": list(seen)}},
                                      {"$set": {"twilio_status": "NOT_IN_TWILIO", "enabled": False, "synced_at": now}})
     if not await db.whatsapp_senders.find_one({"user_id": user_id, "is_default": True, "enabled": True}):
@@ -175,8 +203,13 @@ def refresh_senders_sync() -> int:
             if doc.get("twilio_status") != "NOT_IN_TWILIO":
                 db.whatsapp_senders.update_one({"_id": doc["_id"]}, {"$set": {"twilio_status": "NOT_IN_TWILIO", "enabled": False, "is_default": False, "synced_at": now}})
             continue
-        db.whatsapp_senders.update_one({"_id": doc["_id"]}, {"$set": {**s, "synced_at": now}})
+        restricted = _restriction_fields(s, doc)
+        db.whatsapp_senders.update_one({"_id": doc["_id"]}, {"$set": {**s, "synced_at": now, **restricted}})
         notes = []
+        if restricted:
+            notes.append((f"WhatsApp blocked a number: {doc['phone']}", f"Meta restricted {doc['phone']} (error {s['last_error_code']}), so its "
+                          "messages are refused. It's switched off in Settings → WhatsApp numbers."
+                          + (" It was your default sender: pick another." if doc.get("is_default") else "")))
         if doc.get("twilio_status") == "ONLINE" and s["twilio_status"] != "ONLINE":
             notes.append(("WhatsApp number offline", f"{doc['phone']} is now {s['twilio_status']} on Twilio — sends from it will fail."
                           + (" It's your default sender: pick another in Settings → WhatsApp numbers." if doc.get("is_default") else "")))
@@ -196,9 +229,6 @@ def refresh_senders_sync() -> int:
                                      resource_type="whatsapp_sender", resource_id=str(doc["_id"]),
                                      dedupe_key=f"sender:{doc['phone']}:{title}:{now:%Y%m%d%H}")
     return notified
-
-
-RESTRICTED_CODES = {"63051"}
 
 
 async def mark_sender_restricted(db, from_number: Optional[str], code: str) -> bool:

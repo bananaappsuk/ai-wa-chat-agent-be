@@ -279,3 +279,29 @@ def test_delivery_receipt_with_63051_marks_the_number():
         r2 = c.post("/api/webhook/twilio/status", data={"MessageSid": "SM2", "MessageStatus": "undelivered", "ErrorCode": "63024", "From": f"whatsapp:{A}"})
     assert r1.status_code == 200 and r2.status_code == 200
     assert marked.await_count == 1 and marked.await_args.args[1:] == (f"whatsapp:{A}", "63051")
+
+
+@pytest.mark.asyncio
+async def test_sync_marks_a_number_whose_last_send_was_refused_by_meta():
+    db = AsyncMongoMockClient().db
+    uid = str(UID)
+    await db.whatsapp_senders.insert_one({"user_id": uid, "phone": A, "enabled": True, "is_default": True, "label": "", "twilio_status": "ONLINE"})
+    live = [{**_twilio(A), "last_error_code": "63051"}, {**_twilio(B), "last_error_code": None}]
+    with patch.object(senders, "fetch_twilio_senders", return_value=live):
+        out = await senders.sync_senders(db, uid)
+    by = {d["phone"]: d for d in out}
+    assert by[A]["restricted"] and by[A]["restricted_code"] == "63051" and not by[A]["enabled"] and not by[A]["is_default"]
+    assert not by[B].get("restricted") and by[B]["is_default"] and by[B]["label"] == ""
+
+
+def test_number_check_alerts_once_when_meta_restricts_a_number():
+    db = mongomock.MongoClient().db
+    uid = str(UID)
+    db.whatsapp_senders.insert_one({"user_id": uid, "phone": A, "enabled": True, "is_default": True, "twilio_status": "ONLINE", "quality": "HIGH", "webhook_ok": True})
+    with patch("app.workers.tasks._db", return_value=db), patch.object(senders, "fetch_twilio_senders", return_value=[{**_twilio(A), "last_error_code": "63051"}]), \
+         patch("app.services.notifications._publish_sync", MagicMock(), create=True):
+        assert senders.refresh_senders_sync() == 1
+        assert senders.refresh_senders_sync() == 0
+    doc = db.whatsapp_senders.find_one({"phone": A})
+    assert doc["restricted"] and not doc["enabled"]
+    assert db.notifications.count_documents({"title": f"WhatsApp blocked a number: {A}"}) == 1
