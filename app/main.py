@@ -110,6 +110,7 @@ async def _scheduled_campaigns_loop() -> None:
     last_kb_refresh = 0.0
     last_recovery_scan = 0.0
     last_rescore = 0.0
+    last_template_check = 0.0
     last_inbound_reconcile: float | None = None
     while True:
         try:
@@ -118,6 +119,14 @@ async def _scheduled_campaigns_loop() -> None:
             if loop.time() - last_kb_refresh >= 600:  # knowledge-base auto-refresh check
                 enqueue(kb_tasks.refresh_due_kb_sources)
                 last_kb_refresh = loop.time()
+            if loop.time() - last_template_check >= 120:
+                from app.services import whatsapp_template_approval
+
+                try:
+                    enqueue(whatsapp_template_approval.refresh_app_created_templates)
+                    last_template_check = loop.time()
+                except Exception:
+                    logger.exception("could not queue template approval check")
             if loop.time() - last_rescore >= 3600:
                 from app.services import lead_scoring
 

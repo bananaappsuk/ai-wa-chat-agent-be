@@ -14,6 +14,7 @@ from app.models.campaign import (
     TERMINAL_STATUSES,
     AiPreviewRequest,
     BlastCreate,
+    BlastPrepare,
     CampaignCreate,
     CampaignUpdate,
     campaign_ai_defaults,
@@ -1664,6 +1665,65 @@ async def list_blasts(user: dict = Depends(current_user)) -> list[dict]:
     return [serialize(d) async for d in cur]
 
 
+_SENDABLE_CHECK = ("ok", "landline", "international")
+
+
+@router.post("/blasts/prepare-recipients")
+async def prepare_blast_recipients(payload: BlastPrepare, user: dict = Depends(current_user)) -> dict:
+    """Clean the names and numbers of an uploaded sheet or pasted list before a blast, and mark
+    anyone opted out or (with template_id) already sent that template."""
+    from app.services.sheet_contacts import prepare_contacts
+
+    user_id = str(user["_id"])
+    db = get_db()
+    result = prepare_contacts([list(r)[:50] for r in payload.rows])
+    phones = [c["phone"] for c in result["contacts"] if c["phone"] and c["status"] in _SENDABLE_CHECK]
+    blocked = {d["phone"] async for d in db.blacklist.find({"user_id": user_id, "phone": {"$in": phones}}, {"phone": 1})}
+    blocked |= {
+        d["phone"]
+        async for d in db.leads.find(
+            {"user_id": user_id, "phone": {"$in": phones}, "$or": [{"whatsapp_consent_status": "opted_out"}, {"blacklisted": True}]},
+            {"phone": 1},
+        )
+    }
+    already: set[str] = set()
+    tid = (payload.template_id or "").strip()
+    if ObjectId.is_valid(tid):
+        tpl = await db.templates.find_one({"_id": ObjectId(tid), "user_id": user_id}, {"content_sid": 1})
+        match = [{"template_id": tid}] + ([{"content_sid": tpl["content_sid"]}] if tpl and tpl.get("content_sid") else [])
+        blast_ids = [str(b["_id"]) async for b in db.blast_campaigns.find({"user_id": user_id, "$or": match}, {"_id": 1})]
+        if blast_ids:
+            already = set(await db.blast_recipients.distinct(
+                "phone", {"blast_id": {"$in": blast_ids}, "phone": {"$in": phones}, "status": {"$in": ["sent", "delivered", "read"]}}
+            ))
+    summary: dict[str, int] = {}
+    for c in result["contacts"]:
+        if c["status"] in _SENDABLE_CHECK and c["phone"] in blocked:
+            c["status"], c["note"] = "opted_out", "opted out or blocked"
+        elif c["status"] in _SENDABLE_CHECK and c["phone"] in already:
+            c["status"], c["note"] = "already_sent", "already got this template"
+        summary[c["status"]] = summary.get(c["status"], 0) + 1
+    result["summary"] = summary
+    return result
+
+
+async def _ensure_named_lead(db, user_id: str, phone: str, name: str, lead: Optional[dict]) -> Optional[dict]:
+    from pymongo.errors import DuplicateKeyError
+
+    if lead is None:
+        doc = tasks.new_blast_lead_doc(user_id, phone, name)
+        try:
+            doc["_id"] = (await db.leads.insert_one(doc)).inserted_id
+        except DuplicateKeyError:
+            return await db.leads.find_one({"user_id": user_id, "phone": phone})
+        return doc
+    current = (lead.get("name") or "").strip()
+    if not current or current.lstrip("+").isdigit():
+        await db.leads.update_one({"_id": lead["_id"]}, {"$set": {"name": name}})
+        lead["name"] = name
+    return lead
+
+
 @router.post("/blasts", status_code=202)
 async def create_blast(payload: BlastCreate, user: dict = Depends(current_user)) -> dict:
     from app.config import settings
@@ -1775,6 +1835,15 @@ async def create_blast(payload: BlastCreate, user: dict = Depends(current_user))
         async for d in db.blacklist.find({"user_id": user_id}, {"phone": 1})
     }
 
+    names: dict[str, str] = {}
+    for c in payload.contacts or []:
+        try:
+            phone = to_whatsapp(c.phone).replace("whatsapp:", "")
+        except Exception:
+            continue
+        if (c.name or "").strip() and phone not in names:
+            names[phone] = c.name.strip()[:100]
+
     rows = []
     seen: set[str] = set()
     skip_reasons: dict[str, int] = {}
@@ -1801,10 +1870,13 @@ async def create_blast(payload: BlastCreate, user: dict = Depends(current_user))
             key = elig.reason_code or "blocked"
             skip_reasons[key] = skip_reasons.get(key, 0) + 1
             continue
+        if names.get(normalized):
+            await _ensure_named_lead(db, user_id, normalized, names[normalized], lead)
         rows.append({
             "blast_id": blast_id,
             "user_id": user_id,
             "phone": normalized,
+            "name": names.get(normalized),
             "status": "pending",
             "provider": provider,
             "message_purpose": purpose,

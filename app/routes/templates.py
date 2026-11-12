@@ -4,7 +4,7 @@ from bson import ObjectId
 from app.db.mongo import get_db
 from app.middleware.auth import current_user
 from app.middleware.security import get_request_id
-from app.models.template import TemplateCreate, TemplateUpdate
+from app.models.template import TemplateCreate, TemplateUpdate, WhatsAppTemplateCreate
 from app.models.common import serialize, utcnow
 from app.security.audit import audit
 from app.security.validation import (
@@ -18,6 +18,7 @@ from app.services.whatsapp_template_approval import (
     display_status_label,
     enrich_template_doc_from_info,
     is_whatsapp_template_sendable,
+    library_status_for,
     mask_content_sid,
     normalize_whatsapp_approval_status,
     status_emoji,
@@ -218,19 +219,18 @@ async def refresh_template_status(template_id: str, user: dict = Depends(current
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Unable to refresh template status: {exc}") from exc
 
-    await get_db().templates.update_one(
-        {"_id": ObjectId(template_id), "user_id": user_id},
-        {
-            "$set": {
-                "whatsapp_approval_status": info.get("whatsapp_status"),
-                "whatsapp_category": info.get("whatsapp_category"),
-                "whatsapp_approval_checked_at": utcnow(),
-                "business_initiated": info.get("business_initiated"),
-                "user_initiated": info.get("user_initiated"),
-                "updated_at": utcnow(),
-            }
-        },
-    )
+    update = {
+        "whatsapp_approval_status": info.get("whatsapp_status"),
+        "whatsapp_category": info.get("whatsapp_category"),
+        "whatsapp_approval_checked_at": utcnow(),
+        "business_initiated": info.get("business_initiated"),
+        "user_initiated": info.get("user_initiated"),
+        "updated_at": utcnow(),
+    }
+    if doc.get("created_via") == "app":
+        update.update(library_status_for(info.get("whatsapp_status"), doc.get("status")))
+        update["whatsapp_rejection_reason"] = info.get("rejection_reason")
+    await get_db().templates.update_one({"_id": ObjectId(template_id), "user_id": user_id}, {"$set": update})
     doc = await get_db().templates.find_one({"_id": ObjectId(template_id), "user_id": user_id})
     audit(
         "template.refresh_whatsapp_status",
@@ -240,6 +240,83 @@ async def refresh_template_status(template_id: str, user: dict = Depends(current
         extra={"whatsapp_status": info.get("whatsapp_status")},
     )
     return _serialize_template(doc or {}, info=info)
+
+
+def _slugify(name: str) -> str:
+    import re
+
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:480]
+    return slug or "template"
+
+
+@router.post("/whatsapp", status_code=201)
+async def create_whatsapp_template(payload: WhatsAppTemplateCreate, user: dict = Depends(current_user)) -> dict:
+    """Create a WhatsApp template in the app: build it on Twilio, submit it to WhatsApp for
+    approval and add it to the library. Approval is tracked automatically."""
+    from fastapi.concurrency import run_in_threadpool
+
+    from app.services import twilio_service
+
+    user_id = str(user["_id"])
+    db = get_db()
+    base = payload.template_name or _slugify(payload.name)
+    template_name, n = base, 1
+    while await db.templates.find_one({"user_id": user_id, "whatsapp_template_name": template_name}, {"_id": 1}):
+        n += 1
+        template_name = f"{base}_{n}"
+    actions = []
+    for b in payload.buttons:
+        a = {"type": b.type, "title": b.title}
+        if b.type == "URL":
+            a["url"] = b.url
+        elif b.type == "PHONE_NUMBER":
+            a["phone"] = b.phone
+        else:
+            a["id"] = _slugify(b.title)[:128]
+        actions.append(a)
+    try:
+        created = await run_in_threadpool(
+            twilio_service.create_whatsapp_template,
+            template_name=template_name,
+            language=payload.language,
+            category=payload.category,
+            body=payload.body,
+            samples=payload.samples,
+            header_text=payload.header_text,
+            footer=payload.footer,
+            actions=actions,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    wa = normalize_whatsapp_approval_status(created.get("status")) if created.get("status") else "under_review"
+    now = utcnow()
+    doc = {
+        "user_id": user_id,
+        "name": payload.name.strip(),
+        "content_sid": created["content_sid"],
+        "language": payload.language,
+        "status": "rejected" if wa == "rejected" else "pending",
+        "variables": list(payload.samples.keys()),
+        "provider": "twilio_content",
+        "created_via": "app",
+        "whatsapp_template_name": template_name,
+        "whatsapp_approval_status": wa,
+        "whatsapp_category": payload.category,
+        "whatsapp_rejection_reason": created.get("rejection_reason"),
+        "whatsapp_approval_checked_at": now,
+        "template_body": payload.body,
+        "header_text": payload.header_text,
+        "footer": payload.footer,
+        "buttons": [b.model_dump(exclude_none=True) for b in payload.buttons],
+        "samples": payload.samples,
+        "created_at": now,
+        "updated_at": now,
+    }
+    res = await db.templates.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    audit("template.create_whatsapp", user_id=user_id, target_id=str(res.inserted_id), request_id=get_request_id(),
+          extra={"content_sid": created["content_sid"], "whatsapp_template_name": template_name})
+    return _serialize_template(doc)
 
 
 @router.post("", status_code=201)

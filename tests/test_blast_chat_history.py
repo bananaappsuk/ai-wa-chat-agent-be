@@ -97,6 +97,7 @@ async def test_first_reply_names_a_blast_contact_from_their_whatsapp_profile():
                                "whatsapp_consent_status": "unknown", "blacklisted": False})
     await db.leads.insert_one({"user_id": UID, "phone": "+447700900999", "name": "Priya", "blacklisted": False})
     with patch("app.services.lead_service.get_db", return_value=db), \
+         patch("app.services.lead_scoring.get_db", return_value=db), \
          patch.object(inbound_whatsapp.ws_manager, "push", new=AsyncMock()):
         for phone, sid in (("+447453289655", "SMr1"), ("+447700900999", "SMr2")):
             await process_inbound_message(InboundMessage(

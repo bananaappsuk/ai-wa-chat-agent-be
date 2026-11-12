@@ -186,12 +186,14 @@ def get_content_template_info(content_sid: str) -> dict:
     wa_category = None
     business_initiated = None
     user_initiated = None
+    rejection_reason = None
     try:
         approvals = client.content.v1.contents(sid).approval_fetch().fetch()
         wa = getattr(approvals, "whatsapp", None) or {}
         if isinstance(wa, dict):
             wa_status_raw = (wa.get("status") or "").strip() or None
             wa_category = (wa.get("category") or "").strip() or None
+            rejection_reason = (wa.get("rejection_reason") or "").strip() or None
             # Some Twilio payloads expose allow flags under nested keys
             bi = wa.get("allow_category_change")  # not BI — keep None unless explicit
             if "business_initiated" in wa:
@@ -227,6 +229,7 @@ def get_content_template_info(content_sid: str) -> dict:
         "business_initiated": business_initiated,
         "user_initiated": user_initiated,
         "provider": "twilio_content",
+        "rejection_reason": rejection_reason,
         "variables": getattr(content, "variables", None) or {},
     }
 
@@ -295,3 +298,58 @@ def validate_signature(url: str, params: dict, signature: str) -> bool:
     if not settings.TWILIO_AUTH_TOKEN or not signature:
         return False
     return _validator().validate(url, params, signature)
+
+
+def create_whatsapp_template(
+    *,
+    template_name: str,
+    language: str,
+    category: str,
+    body: str,
+    samples: dict[str, str],
+    header_text: Optional[str] = None,
+    footer: Optional[str] = None,
+    actions: Optional[list[dict]] = None,
+) -> dict:
+    """Create a Twilio Content template and submit it to WhatsApp for approval.
+    Body only → twilio/text; header, footer or buttons → whatsapp/card."""
+    import httpx
+
+    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
+        raise RuntimeError("Twilio credentials not configured")
+    auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    timeout = httpx.Timeout(30.0, connect=10.0)
+    if header_text or footer or actions:
+        card: dict = {"body": body, "actions": actions or []}
+        if header_text:
+            card["header_text"] = header_text
+        if footer:
+            card["footer"] = footer
+        types = {"whatsapp/card": card}
+    else:
+        types = {"twilio/text": {"body": body}}
+    payload = {"friendly_name": template_name, "language": language, "types": types}
+    if samples:
+        payload["variables"] = samples
+    r = httpx.post("https://content.twilio.com/v1/Content", auth=auth, json=payload, timeout=timeout)
+    if r.status_code >= 300:
+        raise RuntimeError(f"Twilio could not create the template: {_twilio_error(r)}")
+    sid = r.json()["sid"]
+    r = httpx.post(
+        f"https://content.twilio.com/v1/Content/{sid}/ApprovalRequests/whatsapp",
+        auth=auth,
+        json={"name": template_name, "category": category},
+        timeout=timeout,
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Template created ({sid}) but WhatsApp submission failed: {_twilio_error(r)}")
+    data = r.json()
+    return {"content_sid": sid, "status": data.get("status"), "rejection_reason": data.get("rejection_reason") or None}
+
+
+def _twilio_error(r) -> str:
+    try:
+        d = r.json()
+        return str(d.get("message") or d.get("detail") or d)[:300]
+    except Exception:
+        return (r.text or str(r.status_code))[:300]

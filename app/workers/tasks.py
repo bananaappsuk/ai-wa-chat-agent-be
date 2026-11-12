@@ -1411,19 +1411,29 @@ def _find_or_create_blast_lead(db, user_id: str, phone: str) -> Optional[dict]:
     lead), so the blast is in its chat when they reply."""
     from pymongo.errors import DuplicateKeyError
 
-    from app.services.whatsapp_consent import CONSENT_DEFAULTS
-
     p = normalize_e164(phone)
     if not p:
         return None
     existing = db.leads.find_one({"user_id": user_id, "phone": p})
     if existing:
         return existing
+    doc = new_blast_lead_doc(user_id, p)
+    try:
+        doc["_id"] = db.leads.insert_one(doc).inserted_id
+    except DuplicateKeyError:
+        return db.leads.find_one({"user_id": user_id, "phone": p})
+    _publish(user_id, "lead:updated", _serialize(doc))
+    return doc
+
+
+def new_blast_lead_doc(user_id: str, phone: str, name: Optional[str] = None) -> dict:
+    from app.services.whatsapp_consent import CONSENT_DEFAULTS
+
     now = datetime.now(timezone.utc)
-    doc = {
+    return {
         "user_id": user_id,
-        "name": p,
-        "phone": p,
+        "name": (name or "").strip() or phone,
+        "phone": phone,
         "score": "cold",
         "lead_score": 0,
         "score_updated_at": now,
@@ -1440,12 +1450,6 @@ def _find_or_create_blast_lead(db, user_id: str, phone: str) -> Optional[dict]:
         "created_at": now,
         "updated_at": now,
     }
-    try:
-        doc["_id"] = db.leads.insert_one(doc).inserted_id
-    except DuplicateKeyError:
-        return db.leads.find_one({"user_id": user_id, "phone": p})
-    _publish(user_id, "lead:updated", _serialize(doc))
-    return doc
 
 
 def record_blast_in_chat(db, *, user_id: str, lead: Optional[dict], blast: dict, text: str, provider: str,

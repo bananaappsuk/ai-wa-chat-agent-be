@@ -252,10 +252,21 @@ class AiPreviewRequest(BaseModel):
     selected_lead_ids: Optional[list[str]] = None
 
 
+class BlastContact(BaseModel):
+    phone: str = Field(min_length=1, max_length=40)
+    name: Optional[str] = Field(default=None, max_length=100)
+
+
+class BlastPrepare(BaseModel):
+    rows: list[list[Any]] = Field(min_length=1, max_length=20000)
+    template_id: Optional[str] = None
+
+
 class BlastCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     message: Optional[str] = Field(default=None, max_length=1600)
     recipients: list[str] = Field(min_length=1, max_length=5000)
+    contacts: Optional[list[BlastContact]] = Field(default=None, max_length=5000)
     template_id: Optional[str] = None
     content_variables: Optional[dict[str, str]] = None
     media_url: Optional[str] = Field(default=None, max_length=500)

@@ -181,3 +181,58 @@ def enrich_template_doc_from_info(doc: dict[str, Any], info: dict[str, Any]) -> 
     out["provider"] = info.get("provider") or "twilio_content"
     out["whatsapp_sendable"] = wa == "approved"
     return out
+
+
+def library_status_for(wa_status: Optional[str], current: Optional[str]) -> dict:
+    """Templates created in the app follow WhatsApp's decision in the library."""
+    if wa_status == "approved" and current != "approved":
+        return {"status": "approved"}
+    if wa_status == "rejected" and current != "rejected":
+        return {"status": "rejected"}
+    return {}
+
+
+def refresh_app_created_templates(limit: int = 50) -> int:
+    """Poll WhatsApp approval for templates created in the app and still under review; notify
+    the user when one is approved or rejected."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.services import twilio_service
+    from app.services.notifications import create_notification_sync
+    from app.workers.tasks import _db
+
+    db = _db()
+    now = datetime.now(timezone.utc)
+    pending = db.templates.find(
+        {
+            "created_via": "app",
+            "content_sid": {"$nin": [None, ""]},
+            "whatsapp_approval_status": {"$nin": ["approved", "rejected", "paused", "disabled"]},
+            "created_at": {"$gte": now - timedelta(days=14)},
+        }
+    ).limit(limit)
+    changed = 0
+    for t in pending:
+        try:
+            info = twilio_service.get_content_template_info(t["content_sid"])
+        except Exception:
+            continue
+        wa = info.get("whatsapp_status")
+        update = {"whatsapp_approval_status": wa, "whatsapp_approval_checked_at": now,
+                  "whatsapp_rejection_reason": info.get("rejection_reason"), **library_status_for(wa, t.get("status"))}
+        db.templates.update_one({"_id": t["_id"]}, {"$set": update})
+        if wa in ("approved", "rejected") and wa != t.get("whatsapp_approval_status"):
+            changed += 1
+            reason = info.get("rejection_reason")
+            create_notification_sync(
+                db,
+                user_id=t["user_id"],
+                type="system",
+                title=f"Template {'approved' if wa == 'approved' else 'rejected'}: {t.get('name')}",
+                message=("WhatsApp approved it — you can send it now." if wa == "approved"
+                         else f"WhatsApp rejected it{': ' + reason if reason else ''}. Edit the text and create it again."),
+                resource_type="template",
+                resource_id=str(t["_id"]),
+                dedupe_key=f"template_status:{t['_id']}:{wa}",
+            )
+    return changed

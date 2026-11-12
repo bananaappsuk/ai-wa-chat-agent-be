@@ -14,6 +14,12 @@ UID = str(ObjectId())
 NOW = datetime.now(timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_clock():
+    global NOW
+    NOW = datetime.now(timezone.utc)
+
+
 @pytest.fixture
 def db():
     d = mongomock.MongoClient().db
